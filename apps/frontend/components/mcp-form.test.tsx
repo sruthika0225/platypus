@@ -321,7 +321,7 @@ describe("McpForm OAuth", () => {
       oauthClientId: "client-id",
       oauthAuthorized,
     } as unknown as MCP);
-    render(<McpForm orgId="org1" workspaceId="ws1" mcpId="m1" />);
+    return render(<McpForm orgId="org1" workspaceId="ws1" mcpId="m1" />);
   };
 
   // The popup reports back by postMessage; only this app's own origin may
@@ -361,5 +361,40 @@ describe("McpForm OAuth", () => {
       "http://test/organizations/org1/workspaces/ws1/mcps/m1",
       "http://test/organizations/org1/workspaces/ws1/mcps/m1/oauth/authorize?force=true",
     ]);
+  });
+
+  it("clears OAuth polling interval when unmounted", async () => {
+    stubSaveSequence(
+      { status: 200, body: { id: "m1" } },
+      {
+        status: 200,
+        body: {
+          authorizationUrl: "http://mcp.test/oauth",
+        },
+      },
+    );
+
+    const popup = {
+      closed: false,
+    };
+
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+
+    const { unmount } = renderOAuthMcp(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Authorize" }));
+
+    await waitFor(() => expect(setIntervalSpy).toHaveBeenCalled());
+
+    const intervalId =
+      setIntervalSpy.mock.results[setIntervalSpy.mock.results.length - 1]
+        ?.value;
+
+    unmount();
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(intervalId);
   });
 });

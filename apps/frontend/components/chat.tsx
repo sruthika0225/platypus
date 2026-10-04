@@ -303,6 +303,18 @@ export const Chat = ({
   const [isAgentInfoDialogOpen, setIsAgentInfoDialogOpen] = useState(false);
   const [showErrorDialog, setShowErrorDialog] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const copyMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  useEffect(() => {
+    return () => {
+      if (copyMessageTimeoutRef.current) {
+        clearTimeout(copyMessageTimeoutRef.current);
+        copyMessageTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Show the error dialog when a new error arrives from useChat. Keyed on the
   // error so the user can still dismiss the dialog while the error persists,
@@ -485,7 +497,15 @@ export const Chat = ({
         await navigator.clipboard.writeText(content);
         toast.info("Copied to clipboard");
         setCopiedMessageId(messageId);
-        setTimeout(() => setCopiedMessageId(null), 2000);
+
+        if (copyMessageTimeoutRef.current) {
+          clearTimeout(copyMessageTimeoutRef.current);
+        }
+
+        copyMessageTimeoutRef.current = setTimeout(() => {
+          setCopiedMessageId(null);
+          copyMessageTimeoutRef.current = null;
+        }, 2000);
       } catch {
         toast.error("Failed to copy to clipboard");
       }

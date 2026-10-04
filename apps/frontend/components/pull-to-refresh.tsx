@@ -51,6 +51,8 @@ export function PullToRefresh({
   const settledRef = useRef(false);
   // Ref mirrors so callbacks never read stale state
   const pullDistanceRef = useRef(0);
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshCancelledRef = useRef(false);
 
   const handleTouchStart = useCallback((e: TouchEvent) => {
     startYRef.current = e.touches[0].clientY;
@@ -120,6 +122,7 @@ export function PullToRefresh({
     const currentPullDistance = pullDistanceRef.current;
 
     if (currentPullDistance >= REFRESH_THRESHOLD) {
+      refreshCancelledRef.current = false;
       isRefreshingRef.current = true;
       setIsRefreshing(true);
       setIsPulling(false);
@@ -128,10 +131,18 @@ export function PullToRefresh({
       try {
         await onRefresh();
         // Linger so the spinner is visible before the indicator exits
-        await new Promise<void>((resolve) => setTimeout(resolve, 600));
+        await new Promise<void>((resolve) => {
+          refreshTimeoutRef.current = setTimeout(() => {
+            refreshTimeoutRef.current = null;
+            resolve();
+          }, 600);
+        });
       } finally {
         isRefreshingRef.current = false;
-        setIsRefreshing(false);
+
+        if (!refreshCancelledRef.current) {
+          setIsRefreshing(false);
+        }
       }
     } else {
       setIsPulling(false);
@@ -152,6 +163,13 @@ export function PullToRefresh({
       el.removeEventListener("touchstart", handleTouchStart);
       el.removeEventListener("touchmove", handleTouchMove);
       el.removeEventListener("touchend", handleTouchEnd);
+
+      refreshCancelledRef.current = true;
+
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
     };
   }, [handleTouchStart, handleTouchMove, handleTouchEnd]);
 

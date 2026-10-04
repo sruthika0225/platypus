@@ -29,6 +29,18 @@ export function TagInput({
 }: TagInputProps) {
   const [inputValue, setInputValue] = React.useState("");
   const [flashingTag, setFlashingTag] = React.useState<string | null>(null);
+  const flashTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  React.useEffect(() => {
+    return () => {
+      if (flashTimeoutRef.current) {
+        clearTimeout(flashTimeoutRef.current);
+        flashTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   const addTag = (tag: string) => {
     const trimmedTag = tag.trim().toLowerCase();
@@ -38,7 +50,15 @@ export function TagInput({
 
     if (value.includes(trimmedTag)) {
       setFlashingTag(trimmedTag);
-      setTimeout(() => setFlashingTag(null), 1000);
+
+      if (flashTimeoutRef.current) {
+        clearTimeout(flashTimeoutRef.current);
+      }
+
+      flashTimeoutRef.current = setTimeout(() => {
+        setFlashingTag(null);
+        flashTimeoutRef.current = null;
+      }, 1000);
       setInputValue("");
       return;
     }
