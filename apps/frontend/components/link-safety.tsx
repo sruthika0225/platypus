@@ -2,7 +2,7 @@
 
 import { CopyIcon, ExternalLinkIcon } from "lucide-react";
 import type { LinkSafetyConfig, LinkSafetyModalProps } from "streamdown";
-import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,14 +25,8 @@ const LinkSafetyDialog = ({
   onConfirm,
   url,
 }: LinkSafetyModalProps) => {
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success("Link copied to clipboard");
-    } catch {
-      toast.error("Failed to copy link");
-    }
-  };
+  const handleCopy = () =>
+    copyWithToast(url, "Link copied to clipboard", "Failed to copy link");
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
