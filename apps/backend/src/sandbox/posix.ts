@@ -196,7 +196,7 @@ const readForTool = async (
 ): Promise<Buffer> => {
   try {
     return await raceCancellation(signal, () =>
-      transport.readFile(ctx, absPath(rootDir, path), cap),
+      transport.readFile(ctx, absPath(rootDir, path), cap, signal),
     );
   } catch (cause) {
     const detail =
@@ -440,5 +440,9 @@ export const createPosixSandbox = (
 
   destroy(ctx: SandboxContext): Promise<void> {
     return transport.destroy(ctx);
+  },
+
+  close(): Promise<void> {
+    return transport.close?.() ?? Promise.resolve();
   },
 });

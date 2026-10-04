@@ -35,6 +35,10 @@ _Avoid_: parsed text, converted file, OCR (Platypus does not OCR).
 **Agent**:
 A configurable preset that pins a Provider, model, Instructions, generation parameters, Tools, Skills, and Sub-Agents. Selecting an Agent on a Chat turn replaces direct Provider/model selection.
 
+**A2A endpoint**:
+An **Agent** made reachable to outside agents and chat platforms over A2A from one Workspace, under its own unguessable URL. Each endpoint has its own public name and description, which may differ from the Agent's own description, its own tokens (one per client) and its own memory settings. An Agent can have several endpoints. Every conversation through an endpoint is an ordinary **Chat** the Owner can read and continue. The run acts as the Workspace Owner, so a token is only as safe as the Agent's tools are narrow. Reachable only while the Organization's gate admits its Workspace and the Workspace has an Owner who is still a member.
+_Avoid_: published Agent (an endpoint is not public), A2A exposure, API key (a token reaches one endpoint, not the API).
+
 **Sub-Agent**:
 An Agent referenced by a parent Agent, advertised to it in a catalogue and reachable by name through the parent's one delegation Tool. Invoking it starts a run in its own right — bounded by the same per-step and per-run timeouts the parent turn was started under, and cancelled when the parent is — but never a Chat, and never a run record of its own: under a **Trigger run** its work is persisted as **Run events** nested beneath the parent's delegation, and under a Chat turn only as the parent message's tool part.
 
@@ -109,7 +113,7 @@ _Avoid_: degraded capability, disabled capability, failed tool.
 A named bundle of Tools an Agent can be granted. Either contributed by a Plugin (registered in code) or backed by an MCP server.
 
 **Tool session**:
-One Agent's Tool sets, resolved for one Chat turn, together with the connections opened to serve them. Sessions nest: a Sub-Agent's session is opened on its first delegation and closes with the parent's, so a turn has exactly one thing to dispose however many tool sources it reached. A Tool set or Web-search backend that opens something with a lifetime registers its own close into that same one thing. A Tool set that cannot serve the turn — a factory that throws, an unreachable MCP with no **Last-known tool listing** to fall back on — costs its own Tools and no more.
+One Agent's Tool sets, resolved for one Chat turn, together with the connections opened to serve them. Sessions nest: a Sub-Agent's session is opened on its first delegation and closes with the parent's, so a turn has exactly one thing to dispose however many tool sources it reached. A Tool set or Web-search backend that opens something with a lifetime registers its own close into that same one thing. A Tool set that cannot serve the turn — a factory that throws or does not return in time, an unreachable or unanswering MCP with no **Last-known tool listing** to fall back on, an MCP that rejects its credentials — costs its own Tools and no more.
 _Avoid_: tool context (that is the scope handed to a Tool set factory), tool loader.
 
 **Web tool block**:
@@ -120,12 +124,20 @@ _Avoid_: web search card, search result block (both name only the search case; t
 A Model Context Protocol server registered at Workspace scope, or — as a Shared resource — at Organization scope. Resolves to a Tool set at Chat-turn time.
 
 **Last-known tool listing**:
-An **MCP**'s tool definitions as its server last listed them, kept on the MCP itself and served when a **Chat turn** fails to reach the server — for up to a day after that last successful fetch. Keeps the tool list the model is sent unchanged across a blip, so the cached prompt survives it; a Tool served this way connects when called, and fails as unreachable if the server is still down. Cleared when the MCP's URL, auth or headers are edited.
+An **MCP**'s tool definitions as its server last listed them, kept on the MCP itself and served when a **Chat turn** fails to reach the server — for up to a day after that last successful fetch. Keeps the tool list the model is sent unchanged across a blip, so the cached prompt survives it; a Tool served this way connects when called, and fails as unreachable if the server is still down. Not served when the server rejects the MCP's credentials: that is no blip, and needs re-authorising. Cleared when the MCP's URL, auth or headers are edited. For a minute after a fetch fails it is served at once, without trying the server again.
 _Avoid_: tool cache (it is not consulted when the server is up), stale tools.
 
 **Read-only hint**:
 An **MCP** server's own declaration that one of its tools does not change anything — it only reads. Self-reported and unverified, which is what "hint" is doing in the name: the protocol states plainly that it may not describe a tool faithfully. Trusted in proportion to what acting on it costs, and decided per consumer rather than once for all of them (ADR-0021): enough to let **Tool-result clearing** drop a result, never enough to skip something a User would want to have been asked about. A tool that declares nothing is treated as one that writes.
 _Avoid_: read-only flag, safe tool, tool safety (all three claim a verification nobody performed), annotation (that names the protocol's whole carrier, of which this is one field).
+
+**Tool gate**:
+An Extension point whose Contributions see a tool call before it runs and return a **Verdict** on it (ADR-0033, not yet built). A gate only gates: it never changes a call's arguments or its result. Gates apply deployment-wide to every tool call the backend executes, in every Chat turn, Trigger run, A2A call and Sub-Agent run. A tool the Provider executes itself never reaches a gate. A gate that throws or times out has said `ask`, never `allow`.
+_Avoid_: tool-call middleware (middleware can also transform; a gate cannot), guardrail (that names the Provider's system-prompt text), approval (that names the User's answer to an `ask`).
+
+**Verdict**:
+A **Tool gate**'s answer about one tool call: `allow`, `ask` or `deny`, optionally with a reason. Several gates combine to the most restrictive Verdict. `deny` is final. `ask` puts the call to the User only in a top-level Chat turn, and is `deny` in a Trigger run, an A2A call or a Sub-Agent run, because there is no one there to answer. A denied call reaches the model as a tool error carrying the reason, and the run continues.
+_Avoid_: score, confidence (a decision model's output, which a gate turns into a Verdict; core never sees it), decision.
 
 **Skill**:
 A named capability with a description, attached to an Agent. Its instructions are loaded on demand rather than carried in the prompt, by either of two routes: the model requests it through the `loadSkill` Tool, or a User names it with a **Slash command**. A Skill marked user-invocable only is left out of the catalogue the model is shown and stays reachable by the second route alone. Lives at Workspace scope, or — as a Shared resource — at Organization scope.
@@ -162,8 +174,20 @@ A typed tile on a **Dashboard** — metric, text/markdown, image, Embed, weather
 _Avoid_: tile, panel, component.
 
 **Trigger**:
-A saved automation that runs an Agent unattended against a fixed Instruction — no Chat, nobody watching. One of two shapes: a **Cron Trigger**, firing on a schedule evaluated in the Trigger's own timezone, or an **Event Trigger**, firing when a subscribed **Webhook event** occurs in the Workspace, debounced so a burst coalesces into one run, and capped per entity so no Event Trigger runs without bound against one Card or Notification. The event's payload arrives above the Instruction, so the Instruction can point at it. An Agent's own writes never fire that Agent's own Event Trigger — including writes made on its behalf by a Sub-Agent, at any depth.
+A saved automation that runs an Agent unattended against a fixed Instruction — no Chat, nobody watching. One of three shapes: a **Cron Trigger**, firing on a schedule evaluated in the Trigger's own timezone and never overlapping itself — a run that comes due while its last run is still live is skipped, not queued; an **Event Trigger**, firing when a subscribed **Webhook event** occurs in the Workspace, debounced so a burst coalesces into one run, and capped per entity so no Event Trigger runs without bound against one Card or Notification; or an **Inbound Trigger**, fired by an external caller. The event's payload, or the inbound call's **Trigger inputs**, arrive above the Instruction, so the Instruction can point at them. An Agent's own writes never fire that Agent's own Event Trigger — including writes made on its behalf by a Sub-Agent, at any depth.
 _Avoid_: automation, job, scheduler, webhook (that delivers events out; it runs nothing).
+
+**Inbound Trigger**:
+A **Trigger** an external system fires by calling it with that Trigger's bearer token — never a **Webhook event**, and never a session. The token grants exactly "run this Agent with this Instruction", is shown to the Workspace Owner once, and always expires; only the Owner creates, edits or deletes one, in the UI, and an Agent's Trigger tools can do none of those nor read its token. The run acts as the Workspace Owner like every Trigger run, so the token is only as safe as the Agent's tools are narrow. Reachable only while the Organization's gate admits its Workspace.
+_Avoid_: webhook trigger (a Webhook delivers events out), API key (the token reaches one Trigger, not the API).
+
+**Trigger input**:
+A named string an **Inbound Trigger** declares — required or optional, with a description — and a call supplies as `{ "inputs": { … } }`. A call missing a required input, naming an undeclared one or sending a non-string is refused whole; nothing is truncated or coerced. The Agent sees them with their descriptions in a labelled block above the Instruction, which refers to them by name — there is no templating.
+_Avoid_: parameter, argument, payload (an Event Trigger's payload is a Webhook event's data).
+
+**Record key**:
+The one required **Trigger input** an **Inbound Trigger** may mark as identifying the record a call is about, such as an issue key. The run-rate breaker counts per value of it — with none marked it counts the whole Trigger, so no inbound run is exempt — and a call for a record that already has a `pending` or `running` run gets that run's id back, marked deduplicated, instead of starting a second Agent on it.
+_Avoid_: entity id, correlation id.
 
 **Trigger run**:
 One execution of a **Trigger** — the headless shape of a **Drive**. Recorded separately from any Chat under its own status vocabulary (`pending` / `running` / `success` / `failed` / `cancelled` / `suppressed` — not the chat-run words), with its own stats, its own **Run timeline** and its own retention: Max Runs to Keep bounds the history, everything inside the run-rate breaker's window is kept so its count stays countable, and _suppressed_ rows have a budget of their own. A _suppressed_ Trigger run is a firing the run-rate breaker dropped before the Agent started, so it never ran; the row is the visible trace of the breaker tripping. Bounded by the same **Output ceiling** and **Step ceiling** as any Drive, plus the unattended-only no-progress stop: repeating the same tool call and getting the same result several times in a row ends the run as _failed_, naming the tool — distinct from a step-limit stop, which still ends _success_.
@@ -186,7 +210,7 @@ One of the enumerated Workspace occurrences a **Webhook** subscribes to and an *
 _Avoid_: domain event, platform event; "notification" (reserved for the Notification itself).
 
 **Notification**:
-A short message an Agent posts to a Workspace's feed — the reply an unattended run leaves when there was no Chat anyone was watching. In-app only: nothing is emailed or pushed, and in-app Notifications never route to a messaging **Surface**. Read-state tracked per User; an Agent can edit and dismiss only the Notifications it posted itself. Posting one is granted per-Agent through the Notifications Tool set.
+A short message an Agent posts to a Workspace's feed — the reply an unattended run leaves when there was no Chat anyone was watching. In-app only: nothing is emailed or pushed. Read-state tracked per User; an Agent can edit and dismiss only the Notifications it posted itself. Posting one is granted per-Agent through the Notifications Tool set.
 _Avoid_: alert, push, mention, message (that names a Chat's unit).
 
 **Plugin**:
@@ -194,7 +218,7 @@ A distributable bundle — one package, one version, one config namespace, one e
 _Avoid_: extension (reserve for Extension point), add-on, module.
 
 **Extension point**:
-A typed slot, defined and owned by core, that a Plugin fills. The set is fixed — Plugins cannot define new ones, though core may add points (each is a purely additive, minor API bump). The Extension points are Sandbox backends, Tool sets and Web-search backends (ADR-0014); the first two shipped with the Plugin system, the third followed it. The messaging **Gateway adapter** is deliberately _not_ a backend Extension point — it lives in the separate **Gateway** app behind its own adapter seam (ADR-0015).
+A typed slot, defined and owned by core, that a Plugin fills. The set is fixed — Plugins cannot define new ones, though core may add points (each is a purely additive, minor API bump). The Extension points are Sandbox backends, Tool sets and Web-search backends (ADR-0014); the first two shipped with the Plugin system, the third followed it. A fourth, **Tool gates**, is decided but not yet built (ADR-0033).
 _Avoid_: hook, slot.
 
 **Contribution**:
@@ -253,32 +277,6 @@ _Avoid_: magic link, signup link, activation link.
 Creating an account through the public form, reached from the sign-in page's **Sign up** link — as opposed to redeeming an Invitation link. Open by default; the Operator closes it deployment-wide with `REQUIRE_INVITATION_TO_SIGN_UP`, after which an Invitation link is the only way an account comes into existence.
 _Avoid_: registration, self-registration.
 
-**Gateway** (Messaging gateway):
-A decoupled, stateful app — deployed alongside the frontend and backend — that bridges external chat Surfaces to Platypus, relaying messages both ways. Holds the long-lived per-Surface connections and hosts Gateway adapters; the backend itself stays messaging-agnostic. Platypus, not the Gateway, is the identity authority.
-_Avoid_: bot, bridge, connector.
-
-**Surface**:
-An external chat platform Platypus can be reached through — Telegram, Slack, Discord, and others.
-_Avoid_: channel (a Surface's own rooms are "channels"), platform.
-
-**Gateway adapter**:
-The first-party, in-repo module that integrates one Surface with the Gateway, implementing a uniform capability contract (auth, inbound, outbound, streaming, threading, pairing). Contributed through the Gateway's own adapter seam — not the backend Plugin system.
-_Avoid_: channel adapter, connector, driver.
-
-**Sender**:
-The identity of whoever sent a message on a Surface (e.g. a Telegram user, a Slack team+user, a Discord user). Resolved to a User through an Identity link — this is what authorizes a relayed message.
-_Avoid_: from, author.
-
-**Conversation locus**:
-The addressable place on a Surface where one conversation lives and where replies are posted — a direct message, or a thread/room. Resolved to a Chat through a Conversation binding — this is what routes messages.
-_Avoid_: conversation, channel, thread.
-
-**Identity link**:
-The record binding a Sender to a User. Created only through a User-authenticated linking flow (a Platypus-minted, single-use, short-lived code the User relays to the Surface); the Gateway can relay but never mint one. Authorizes; does not route.
-
-**Conversation binding**:
-The record binding a Conversation locus to a Chat (which carries the Workspace + Agent). On a single-stream Surface (e.g. a Telegram DM) it is the single rolling Chat, rebound by `/new`; on a thread-capable Surface each thread is its own binding and Chat. Routes; does not authorize.
-
 ## Relationships
 
 - An **Organization** has many **Workspaces**.
@@ -298,6 +296,7 @@ The record binding a Conversation locus to a Chat (which carries the Workspace +
 - Every **Chat turn**, **Sub-Agent** run and **Trigger** run also drives under a **Step ceiling**, which bounds the loop rather than any one reply. Both ceilings can cut a turn short, and each records which one did, so the notice a reader sees names the limit that applied.
 - A **Board** owns its ordered **Columns**; a **Card** lives in exactly one **Column** at a time. Moving a Card between Columns is what `card.moved` names — a reorder within one Column fires only `card.updated`.
 - A **Board** write and a **Notification** post emit **Webhook events**. The stream has two consumers: an **Event Trigger** runs an Agent inside Platypus in response, a **Webhook** delivers the event to an external URL — and neither consumer affects the other.
+- An **Inbound Trigger** is the stream's opposite direction without being part of it: an external call arrives under the Trigger's token, not as a **Webhook event**, so nothing it carries reaches a Webhook subscriber or an Event Trigger's debounce.
 - A **Trigger** is the headless shape of a **Drive**: its Agent runs unattended as a **Trigger run**, and a **Notification** is the reply it leaves behind when there was no Chat anyone was watching.
 - A **Chat turn** may also record an **Unavailable capability** — something it was asked to run with that **Turn resolution** could not supply. Like the **Output ceiling** cutoff it is a per-turn outcome told to the User under the reply, and unlike it, it is known before the model is ever called.
 - An **Agent**, **Skill**, **MCP**, or **Provider** is a **Scoped resource**: its row carries either an `organizationId` or a `workspaceId`, never both. Resolved relative to a **Workspace**, an Organization-scoped one is a **Shared resource**, visible only through an **Attachment**; a Sandbox-backed **Tool set** instead rebinds to the invoking **Workspace**'s **Sandbox** at Chat-turn time.
@@ -305,9 +304,6 @@ The record binding a Conversation locus to a Chat (which carries the Workspace +
 - **Workspaces** are created only by **Org Admins** — directly, or auto-provisioned for a member when they accept an invitation. An invitation carries an ordered set of zero-or-more **Blueprints**; on accept they are applied to the new Workspace in order (Attachments union; later Blueprints win on any single-valued pointer-setting). Members do not create their own Workspaces.
 - An **Invitation** is redeemed through its **Invitation link**, which creates the account and joins the Organization in one act; a person who already holds an account instead accepts the Invitation in-app. Where the Operator requires invitations, redemption is the only way an account comes into existence — admission is the **Operator**'s to constrain, never an **Org Admin**'s to widen.
 - Authority over configuration runs **Operator** → **Org Admin** → **Workspace Owner**; each tier is bounded by the tier above it.
-- A **Gateway** hosts many **Gateway adapters**, one per **Surface**. A message on a **Surface** carries a **Sender** and arrives at a **Conversation locus**.
-- A **Sender** resolves to a **User** through an **Identity link** (authorizes); a **Conversation locus** resolves to a **Chat** through a **Conversation binding** (routes). The two are separate because in a shared room "who spoke" and "where it happened" diverge; a direct message collapses them 1:1.
-- An inbound Surface message drives a **Chat turn** as the linked **User**; the reply streams back over the inbound call. Agent-initiated (proactive) output appends a message to the bound **Chat** and is delivered to its **Conversation locus** — distinct from in-app notifications, which never route to a **Surface**.
 
 ## Example dialogue
 

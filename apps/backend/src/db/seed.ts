@@ -2,6 +2,12 @@ import { count, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type { db } from "../index.ts";
 import { logger } from "../logger.ts";
+import { errorMessage } from "../utils/error-message.ts";
+import {
+  ADVISORY_LOCK_IDS,
+  withAdvisoryLock,
+  type LockPool,
+} from "./advisory-lock.ts";
 import { organization, organizationMember, user } from "./schema.ts";
 
 /** The Drizzle handle the seed writes through. */
@@ -62,9 +68,6 @@ const isDeterministicRejection = (error: unknown): boolean => {
   const status = (error as { statusCode?: unknown } | null)?.statusCode;
   return typeof status === "number" && status >= 400 && status < 500;
 };
-
-const errorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
 
 /**
  * better-auth's default minimum, which its sign-up and password-change
@@ -177,6 +180,23 @@ export const seedFirstBoot = async (
     throw error;
   }
 };
+
+/**
+ * `seedFirstBoot` under the seed's advisory lock, for replicas that boot
+ * together. `seedFirstBoot` checks for an Organization and then writes in
+ * separate steps, so two unlocked replicas can both find an empty database and
+ * the second fail on the admin User the first just created. Under the lock the
+ * second waits, then finds the Organization and returns `{ seeded: false }`;
+ * if the first failed instead, the second seeds the database it left clean.
+ */
+export const seedFirstBootExclusively = (
+  database: SeedDatabase,
+  lockPool: LockPool,
+  deps: SeedDeps,
+): Promise<SeedResult> =>
+  withAdvisoryLock(lockPool, ADVISORY_LOCK_IDS.seed, () =>
+    seedFirstBoot(database, deps),
+  );
 
 /**
  * Creates the admin User through better-auth and returns its id.

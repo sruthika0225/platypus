@@ -14,10 +14,15 @@ import {
 import { mockLogger } from "../test-setup.ts";
 import { getStorage } from "../storage/index.ts";
 
-const { mockPrepareChatTurn, mockValidateTurnAttachments } = vi.hoisted(() => ({
-  mockPrepareChatTurn: vi.fn(),
-  mockValidateTurnAttachments: vi.fn().mockResolvedValue(undefined),
-}));
+const { mockPrepareChatTurn, mockValidateTurnAttachments, mockCancelRun } =
+  vi.hoisted(() => ({
+    mockPrepareChatTurn: vi.fn(),
+    mockValidateTurnAttachments: vi.fn().mockResolvedValue(undefined),
+    mockCancelRun: vi.fn(),
+  }));
+
+// Cancel across instances is exercised by run-cancel tests.
+vi.mock("../runs/run-cancel.ts", () => ({ cancelRun: mockCancelRun }));
 
 vi.mock("../services/chat-execution.ts", () => ({
   prepareChatTurn: mockPrepareChatTurn,
@@ -26,6 +31,7 @@ vi.mock("../services/chat-execution.ts", () => ({
 }));
 
 import { createUIMessageStreamResponse, streamText } from "ai";
+import { sql } from "drizzle-orm";
 import app from "../server.ts";
 import { runRegistry } from "../runs/run-registry.ts";
 import { NotFoundError, ValidationError } from "../errors.ts";
@@ -110,13 +116,17 @@ const stored = (
 
 /** user-1 as the owner of ws-1, plus whatever the test adds. */
 const seedTenant = (rows: Store = {}, owner = "user-1") =>
-  seedDb({
-    organization_member: [
-      { id: "m1", userId: "user-1", organizationId: "org-1", role: "admin" },
-    ],
-    workspace: [{ id: "ws-1", organizationId: "org-1", ownerId: owner }],
-    ...rows,
-  });
+  seedDb(
+    {
+      organization_member: [
+        { id: "m1", userId: "user-1", organizationId: "org-1", role: "admin" },
+      ],
+      workspace: [{ id: "ws-1", organizationId: "org-1", ownerId: owner }],
+      ...rows,
+    },
+    // The Chat's primary key is what a turn's claim on a new Chat leans on.
+    { unique: { chat: [{ name: "chat_pkey", columns: ["id"] }] } },
+  );
 
 describe("Chat Routes", () => {
   beforeEach(() => {
@@ -247,6 +257,47 @@ describe("Chat Routes", () => {
       const res = await app.request(baseUrl);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ results: mockChats, totalCount: 3 });
+    });
+
+    const listChats = async (query: string) => {
+      mockSession();
+      mockDb.limit.mockResolvedValueOnce([{ role: "member" }]); // requireOrgAccess
+      mockDb.limit.mockResolvedValueOnce([
+        { ownerId: "user-1", organizationId: "org-1" },
+      ]); // requireWorkspaceAccess
+      mockDb.offset.mockResolvedValueOnce([]);
+      mockDb.where
+        .mockReturnValueOnce(mockDb)
+        .mockReturnValueOnce(mockDb)
+        .mockReturnValueOnce(mockDb)
+        .mockResolvedValueOnce([{ totalCount: 0 }]);
+      return app.request(`${baseUrl}?${query}`);
+    };
+
+    it("clamps negative limit and offset", async () => {
+      const res = await listChats("limit=-1&offset=-1");
+      expect(res.status).toBe(200);
+      expect(mockDb.limit).toHaveBeenLastCalledWith(1);
+      expect(mockDb.offset).toHaveBeenLastCalledWith(0);
+    });
+
+    it("clamps limit to 100", async () => {
+      const res = await listChats("limit=500");
+      expect(res.status).toBe(200);
+      expect(mockDb.limit).toHaveBeenLastCalledWith(100);
+    });
+
+    it("escapes LIKE wildcards in the search term", async () => {
+      const res = await listChats(
+        `search=${encodeURIComponent("100%_done\\now")}`,
+      );
+      expect(res.status).toBe(200);
+      const pattern = "%100\\%\\_done\\\\now%";
+      // Title and tag filters both get the escaped pattern.
+      const withPattern = vi
+        .mocked(sql)
+        .mock.calls.filter(([, ...values]) => values.includes(pattern));
+      expect(withPattern).toHaveLength(2);
     });
   });
 
@@ -718,7 +769,7 @@ describe("Chat Routes", () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
-        message: "Chat deleted successfully",
+        message: "Chat deleted",
       });
     });
 
@@ -843,6 +894,8 @@ describe("Chat Routes", () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as Record<string, unknown>;
       expect(body.message).toMatch(/cancel/i);
+      // Whichever instance holds the run, not just this one (#1237).
+      expect(mockCancelRun).toHaveBeenCalledWith("chat-1");
     });
 
     it("returns 200 when called twice (idempotent)", async () => {
@@ -906,6 +959,29 @@ describe("Chat Routes", () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual(mockChat);
+    });
+
+    it("pins without touching the title or tags", async () => {
+      mockSession();
+      mockDb.limit.mockResolvedValueOnce([{ role: "member" }]); // requireOrgAccess
+      mockDb.limit.mockResolvedValueOnce([
+        { ownerId: "user-1", organizationId: "org-1" },
+      ]); // requireWorkspaceAccess
+      mockDb.returning.mockResolvedValueOnce([{ id: "chat-1", title: "Hi" }]);
+
+      const res = await app.request(`${baseUrl}/chat-1`, {
+        method: "PUT",
+        body: JSON.stringify({ isPinned: true }),
+        headers: { "Content-Type": "application/json" },
+      });
+      expect(res.status).toBe(200);
+      const setArg = mockDb.set.mock.calls.at(-1)![0] as Record<
+        string,
+        unknown
+      >;
+      expect(setArg.isPinned).toBe(true);
+      expect(setArg.title).toBeUndefined();
+      expect(setArg.tags).toBeUndefined();
     });
   });
 
@@ -1063,6 +1139,24 @@ describe("Chat Routes", () => {
         const res = await post({ message: message("u2"), parentId: "a2" });
 
         expect(res.status).toBe(409);
+      });
+
+      // The turn is another instance's, so this process's registry has never
+      // heard of it: only the row says the Chat is taken (#1237).
+      it("409s a turn while another instance runs one, writing nothing", async () => {
+        mockSession();
+        const fake = seedChat();
+        fake.tables.chat[0].status = "running";
+
+        const res = await post({ message: message("u3"), parentId: "a2" });
+
+        expect(res.status).toBe(409);
+        expect(fake.tables.chat_message).toHaveLength(4);
+        expect(fake.tables.chat[0]).toMatchObject({
+          status: "running",
+          activeLeafId: "a2",
+        });
+        expect(mockPrepareChatTurn).not.toHaveBeenCalled();
       });
 
       it.each([
@@ -1278,16 +1372,15 @@ describe("Chat Routes", () => {
         expect((await deleteMessage("nope")).status).toBe(404);
       });
 
+      // Read from the row, not this process: the run may be another
+      // instance's (#1237).
       it("409s while a run is in flight", async () => {
         mockSession();
         const fake = seedChat();
-        runRegistry.register("chat-1");
-        try {
-          expect((await deleteMessage("u2")).status).toBe(409);
-          expect(rowOf(fake, "u2")?.deletedAt).toBeNull();
-        } finally {
-          runRegistry.unregister("chat-1");
-        }
+        fake.tables.chat[0].status = "running";
+
+        expect((await deleteMessage("u2")).status).toBe(409);
+        expect(rowOf(fake, "u2")?.deletedAt).toBeNull();
       });
 
       it("is refused to anyone but the Workspace Owner", async () => {
@@ -1420,15 +1513,13 @@ describe("Chat Routes", () => {
       it("409s while a run is in flight", async () => {
         mockSession();
         const fake = seedAlternatives();
-        runRegistry.register("chat-1");
-        try {
-          const res = await switchTo("u2");
-          expect(res.status).toBe(409);
-          expect(await res.json()).toHaveProperty("error");
-          expect(fake.tables.chat[0].activeLeafId).toBe("a2b");
-        } finally {
-          runRegistry.unregister("chat-1");
-        }
+        // Another instance's run: nothing in this process's registry.
+        fake.tables.chat[0].status = "running";
+
+        const res = await switchTo("u2");
+        expect(res.status).toBe(409);
+        expect(await res.json()).toHaveProperty("error");
+        expect(fake.tables.chat[0].activeLeafId).toBe("a2b");
       });
 
       it("is refused to anyone but the Workspace Owner", async () => {

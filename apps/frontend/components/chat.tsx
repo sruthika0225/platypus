@@ -47,6 +47,7 @@ import { useModelSelection } from "@/hooks/use-model-selection";
 import { resolveModel } from "@/lib/resolve-model";
 import { clearedToolCallIds } from "@/lib/tool-result-clearing";
 import { useStableSet } from "@/hooks/use-stable-set";
+import { useTimeout } from "@/hooks/use-timeout";
 import { useStreamingFavicon } from "@/hooks/use-streaming-favicon";
 import { ContextMeter, ContextMeterEntrance } from "./context-meter";
 import { useMessageEditing } from "@/hooks/use-message-editing";
@@ -67,6 +68,7 @@ import { ChatMessage } from "./chat-message";
 import { MessageEditor } from "./message-editor";
 import { ChatReconnectingNotice } from "./chat-reconnecting-notice";
 import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 import { ChatComposer } from "./chat-composer";
 import { ChatSkeleton } from "./chat-skeleton";
 import { ListError } from "./list-state";
@@ -303,18 +305,7 @@ export const Chat = ({
   const [isAgentInfoDialogOpen, setIsAgentInfoDialogOpen] = useState(false);
   const [showErrorDialog, setShowErrorDialog] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const copyMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-
-  useEffect(() => {
-    return () => {
-      if (copyMessageTimeoutRef.current) {
-        clearTimeout(copyMessageTimeoutRef.current);
-        copyMessageTimeoutRef.current = null;
-      }
-    };
-  }, []);
+  const scheduleCopiedReset = useTimeout();
 
   // Show the error dialog when a new error arrives from useChat. Keyed on the
   // error so the user can still dismiss the dialog while the error persists,
@@ -493,24 +484,12 @@ export const Chat = ({
 
   const handleCopyMessage = useCallback(
     async (content: string, messageId: string) => {
-      try {
-        await navigator.clipboard.writeText(content);
-        toast.info("Copied to clipboard");
+      if (await copyWithToast(content)) {
         setCopiedMessageId(messageId);
-
-        if (copyMessageTimeoutRef.current) {
-          clearTimeout(copyMessageTimeoutRef.current);
-        }
-
-        copyMessageTimeoutRef.current = setTimeout(() => {
-          setCopiedMessageId(null);
-          copyMessageTimeoutRef.current = null;
-        }, 2000);
-      } catch {
-        toast.error("Failed to copy to clipboard");
+        scheduleCopiedReset(() => setCopiedMessageId(null), 2000);
       }
     },
-    [setCopiedMessageId],
+    [setCopiedMessageId, scheduleCopiedReset],
   );
 
   // Stored the moment it is clicked (ADR-0026), then the row is read back:

@@ -3,6 +3,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { RefreshCw } from "lucide-react";
+import { useTimeout } from "@/hooks/use-timeout";
 
 /** How far the finger must travel before releasing triggers a refresh. */
 const REFRESH_THRESHOLD = 80;
@@ -37,6 +38,7 @@ export function PullToRefresh({
   const [pullDistance, setPullDistance] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isPulling, setIsPulling] = useState(false);
+  const scheduleLinger = useTimeout();
 
   const startYRef = useRef(0);
   const startXRef = useRef(0);
@@ -51,8 +53,6 @@ export function PullToRefresh({
   const settledRef = useRef(false);
   // Ref mirrors so callbacks never read stale state
   const pullDistanceRef = useRef(0);
-  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const refreshCancelledRef = useRef(false);
 
   const handleTouchStart = useCallback((e: TouchEvent) => {
     startYRef.current = e.touches[0].clientY;
@@ -122,7 +122,6 @@ export function PullToRefresh({
     const currentPullDistance = pullDistanceRef.current;
 
     if (currentPullDistance >= REFRESH_THRESHOLD) {
-      refreshCancelledRef.current = false;
       isRefreshingRef.current = true;
       setIsRefreshing(true);
       setIsPulling(false);
@@ -130,26 +129,20 @@ export function PullToRefresh({
       setPullDistance(0);
       try {
         await onRefresh();
-        // Linger so the spinner is visible before the indicator exits
-        await new Promise<void>((resolve) => {
-          refreshTimeoutRef.current = setTimeout(() => {
-            refreshTimeoutRef.current = null;
-            resolve();
-          }, 600);
-        });
+        // Linger so the spinner is visible before the indicator exits. On
+        // unmount the timer is dropped and this never settles, which is what
+        // we want: nothing is left to reset.
+        await new Promise<void>((resolve) => scheduleLinger(resolve, 600));
       } finally {
         isRefreshingRef.current = false;
-
-        if (!refreshCancelledRef.current) {
-          setIsRefreshing(false);
-        }
+        setIsRefreshing(false);
       }
     } else {
       setIsPulling(false);
       pullDistanceRef.current = 0;
       setPullDistance(0);
     }
-  }, [onRefresh]);
+  }, [onRefresh, scheduleLinger]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -163,13 +156,6 @@ export function PullToRefresh({
       el.removeEventListener("touchstart", handleTouchStart);
       el.removeEventListener("touchmove", handleTouchMove);
       el.removeEventListener("touchend", handleTouchEnd);
-
-      refreshCancelledRef.current = true;
-
-      if (refreshTimeoutRef.current) {
-        clearTimeout(refreshTimeoutRef.current);
-        refreshTimeoutRef.current = null;
-      }
     };
   }, [handleTouchStart, handleTouchMove, handleTouchEnd]);
 

@@ -43,9 +43,8 @@ Only a **Super Admin** can create an Organization, and only an **Org Admin** can
 invite someone into one. So open sign-up leaks the ability to hold an account, not
 the ability to reach anything in your deployment.
 
-Registered accounts still accumulate rows in your database, and a registered
-address is enough to accept an invitation later, so the exposure is worth closing
-rather than shrugging at.
+Registered accounts still accumulate rows in your database, so the exposure is
+worth closing rather than shrugging at.
 
 ### Invitation-only sign-up
 
@@ -69,10 +68,10 @@ password passes through an administrator's hands. Only the entrance changed.
 <Callout type="warning">
   **The link is the credential.** Whoever holds an invitation link can redeem it
   and become the account it names, so send it over a channel you would trust
-  with a password. If a link reaches the wrong person there is no revoke
-  button: delete the invitation — the trash icon at the end of its row in
-  **Organization settings → Invitations**, then **Delete** — and send a fresh
-  one. Expiry bounds the window either way.
+  with a password. If a link reaches the wrong person there is no revoke button:
+  delete the invitation — the trash icon at the end of its row in **Organization
+  settings → Invitations**, then **Delete** — and send a fresh one. Expiry
+  bounds the window either way.
 </Callout>
 
 Rate limiting for sign-in and invitation links belongs at the reverse proxy —
@@ -130,6 +129,11 @@ What they see depends on whether they're signed in, and as whom:
 
 Either of the first two provisions the Workspace, with any Blueprints applied.
 
+Redeeming a link also confirms the account's address. From then on, later
+invitations to that address appear on the account's **Invitations** page and
+in the notification bell, where it can accept or decline them without a link.
+An account that has never redeemed a link sees none there — send it the link.
+
 </Steps>
 
 <Callout type="warning">
@@ -146,6 +150,12 @@ An invitation is valid for `INVITATION_EXPIRY_DAYS` days, **7** by default. The
 Invitations table shows each one's **Status** and **Expires** date, and an expired
 invitation cannot be accepted — send a new one.
 
+An address can hold one pending invitation per Organization at a time. Once
+that invitation is declined or past its expiry date, you can invite the same
+address again without deleting the old row first. Someone who is already a
+member can't be invited again; if they leave or are removed, you can invite
+them back.
+
 ## Roles
 
 Three levels of authority, each bounded by the one above:
@@ -160,6 +170,10 @@ An Org Admin changes roles from **Organization settings → Members**, using a
 row's **Edit org role**, and can remove somebody with **Remove from Org**. A
 **Super Admin** row shows no actions there — the platform account is not an Org
 Admin's to manage.
+
+Removing a member leaves the Workspaces they own in place and disables every
+Trigger in them. Nobody else can switch those Triggers back on. If you invite
+the person back, they turn on the ones they still want.
 
 ## The platform user-management screen
 

@@ -18,6 +18,9 @@ return c.json({ message: "Board deleted" });
 Never `message` on a 4xx/5xx — that is the one crossing the codebase does not
 make.
 
+A delete or action with nothing to return answers `200 { message }` — never a
+bodiless 204, and never `{ success: true }`.
+
 ## The error seam
 
 Five cross-cutting failures are **thrown**, not returned. A single `onError`
@@ -33,16 +36,22 @@ rule states its message once instead of once per caller:
 | `UnsupportedError` | 501     |
 
 A Postgres unique violation also maps to 409 — detect it through the shared
-helper rather than re-reading the driver's error shape.
+helper rather than re-reading the driver's error shape. So does a foreign-key
+violation, as a backstop only: a delete guarded by a `restrict` reference
+should throw a `ConflictError` naming what still uses the row first.
 
 ```typescript
 if (!row) throw new NotFoundError("Card not found");
 throw new ValidationError("Invalid user assignee");
 ```
 
+A resource referenced in the request body that isn't in this Organization, or
+isn't Shared, is a `NotFoundError` (404) naming what couldn't be used — not a
+422, and no extra detail fields beside `error`.
+
 Throwing is what lets one rule serve more than one surface: the Kanban rules
 answer both the HTTP routes and the Agent tool set from a single place. Reach
-for the seam whenever the failure is one of those four; a 4xx that only one
+for the seam whenever the failure is one of those five; a 4xx that only one
 route can produce still answers inline with `c.json({ error }, status)`. Both
 are current and roughly equally common — the seam is not a migration you
 should finish.

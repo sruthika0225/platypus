@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button";
 import { Copy } from "lucide-react";
 import { useParams } from "next/navigation";
-import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 import { OrganizationForm } from "@/components/organization-form";
 
 const OrgSettingsPage = () => {
@@ -23,10 +23,8 @@ const OrgSettingsPage = () => {
               className="text-muted-foreground"
               variant="ghost"
               size="icon"
-              onClick={() => {
-                navigator.clipboard.writeText(orgId);
-                toast.info("Copied to clipboard");
-              }}
+              aria-label="Copy Organization ID"
+              onClick={() => copyWithToast(orgId)}
             >
               <Copy className="h-4 w-4" />
             </Button>

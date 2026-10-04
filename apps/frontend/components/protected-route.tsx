@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { OctagonX, Home, Building } from "lucide-react";
 import Link from "next/link";
 import { orgRoutes } from "@/lib/routes";
+import { FetchErrorNotice } from "@/components/fetch-error-notice";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -75,6 +76,33 @@ function AccessDenied({
   );
 }
 
+/**
+ * In place of an access denial when the membership or Workspace read behind
+ * it failed: the caller may well have access, so the page offers to read
+ * again rather than turning them away.
+ */
+function AccessReadFailed({
+  error,
+  onRetry,
+}: {
+  error: unknown;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="flex min-h-screen items-center justify-center p-4">
+      <div className="max-w-md">
+        <FetchErrorNotice
+          error={error}
+          subject="page"
+          backHref="/"
+          backLabel="Return Home"
+          onRetry={onRetry}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function ProtectedRoute({
   children,
   requireOrgAdmin = false,
@@ -82,21 +110,32 @@ export function ProtectedRoute({
   requireWorkspaceAccess = false,
   requireSuperAdmin = false,
 }: ProtectedRouteProps) {
-  const { user, isAuthLoading, orgMembership, actor } = useAuth();
+  const {
+    user,
+    isAuthLoading,
+    orgMembership,
+    actor,
+    accessReadError,
+    retryAccessReads,
+  } = useAuth();
   const router = useRouter();
 
+  // With no user, a failed read means the session was never read, not that
+  // there is none.
   useEffect(() => {
-    if (!isAuthLoading && !user) {
+    if (!isAuthLoading && !user && !accessReadError) {
       router.push("/sign-in");
     }
-  }, [user, isAuthLoading, router]);
+  }, [user, isAuthLoading, accessReadError, router]);
 
   if (isAuthLoading) {
     return <>{children}</>;
   }
 
   if (!user) {
-    return null;
+    return accessReadError ? (
+      <AccessReadFailed error={accessReadError} onRetry={retryAccessReads} />
+    ) : null;
   }
 
   if (requireSuperAdmin && !isOperator(actor)) {
@@ -115,6 +154,11 @@ export function ProtectedRoute({
       orgMembership?.role ?? null,
       requiredOrgRole,
     );
+    if (!orgAccess.allowed && accessReadError) {
+      return (
+        <AccessReadFailed error={accessReadError} onRetry={retryAccessReads} />
+      );
+    }
     if (!orgAccess.allowed && orgAccess.reason === "not-a-member") {
       return (
         <AccessDenied
@@ -141,6 +185,11 @@ export function ProtectedRoute({
   }
 
   if (requireWorkspaceAccess && !canAccessWorkspace(actor)) {
+    if (accessReadError) {
+      return (
+        <AccessReadFailed error={accessReadError} onRetry={retryAccessReads} />
+      );
+    }
     return (
       <AccessDenied
         title="Workspace Access Required"

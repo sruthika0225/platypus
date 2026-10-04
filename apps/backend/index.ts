@@ -6,15 +6,17 @@ import { auth } from "./src/auth.ts";
 import { logger } from "./src/logger.ts";
 import {
   NonRetryableSeedError,
-  seedFirstBoot,
+  seedFirstBootExclusively,
   type AdminCreateUser,
 } from "./src/db/seed.ts";
 import { startMemoryScheduler } from "./src/jobs/memory-scheduler.ts";
 import { startScheduler } from "./src/jobs/scheduler.ts";
+import { listenForRunCancels } from "./src/runs/run-cancel.ts";
 import { loadPlugins, type LoadPluginsResult } from "./src/plugins/loader.ts";
 import { setLoadedPlugins } from "./src/plugins/registry.ts";
 import { installProviderWarningLogger } from "./src/provider-warnings.ts";
 import { validateTriggerBreakerConfig } from "./src/services/trigger-breaker.ts";
+import { validateInboundTriggerSettings } from "./src/services/inbound-trigger.ts";
 
 const PORT = process.env.PORT || "4001";
 
@@ -48,12 +50,19 @@ const main = async () => {
     // ceiling on an Event Trigger's run rate against one entity, and a
     // malformed setting must not silently become a default nobody chose.
     validateTriggerBreakerConfig();
+    // Same rule for the Inbound Trigger caps (ADR-0030): the concurrency and
+    // body caps are what bound what an outside caller can make this server do.
+    validateInboundTriggerSettings();
 
     await exponentialBackoff(async () => {
       // Enable pgvector extension for embedding storage (needed before drizzle-kit push in dev)
       await db.execute(sql`CREATE EXTENSION IF NOT EXISTS vector`);
 
-      await seedFirstBoot(db, { createUser: createAdminUser });
+      // Under an advisory lock: replicas booting together would otherwise
+      // race to seed, and the loser fail on the admin User the winner created.
+      await seedFirstBootExclusively(db, db.$client, {
+        createUser: createAdminUser,
+      });
     });
 
     // Load plugins before the HTTP server accepts traffic so their Tool set
@@ -102,6 +111,8 @@ const main = async () => {
   // Start background jobs (safe for horizontal scaling)
   startMemoryScheduler();
   startScheduler();
+  // A cancel received by another instance reaches the runs held here.
+  listenForRunCancels();
 };
 
 const exponentialBackoff = async <T>(

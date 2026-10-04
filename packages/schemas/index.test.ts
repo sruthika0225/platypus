@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { z } from "zod";
 import {
   webhookEventSchema,
   webhookEventDataSchemas,
@@ -29,7 +30,12 @@ import {
   nextTurnOccupancy,
   attachmentCreateSchema,
   chatSubmitSchema,
+  chatSchema,
+  chatUpdateSchema,
+  agentCreateSchema,
+  agentUpdateSchema,
   isValidChatMaxSteps,
+  isValidChatSampling,
   sandboxEnvSchema,
   SANDBOX_ENV_MAX_ENTRIES,
   SANDBOX_ENV_MAX_VALUE_BYTES,
@@ -60,6 +66,14 @@ import {
   triggerRunStatsSchema,
   triggerRunStatusSchema,
   TRIGGER_RUN_STATUS_LABELS,
+  triggerUpdateSchema,
+  triggerCreateSchema,
+  kanbanCardUpdateSchema,
+  kanbanCardCommentUpdateSchema,
+  partialWithoutDefaults,
+  dashboardSchema,
+  dashboardCreateSchema,
+  dashboardUpdateSchema,
 } from "./index";
 
 describe("Organization Schema", () => {
@@ -623,6 +637,42 @@ describe("isValidChatMaxSteps", () => {
   });
 });
 
+describe("isValidChatSampling", () => {
+  // Judged by `chatSchema` itself so the Chat settings inputs, the send guard
+  // and the request validator share one set of bounds (#1177).
+  it.each([
+    ["temperature", 0],
+    ["temperature", 5],
+    ["topP", 0],
+    ["topP", 1],
+    ["topK", 1],
+    ["topK", 40],
+    ["seed", -7],
+    ["presencePenalty", -2],
+    ["frequencyPenalty", 2],
+  ] as const)("accepts %s of %s", (field, value) => {
+    expect(isValidChatSampling(field, value)).toBe(true);
+  });
+
+  it.each([
+    ["temperature", -1],
+    ["topP", -0.1],
+    ["topP", 1.5],
+    ["topK", 0],
+    ["topK", 2.5],
+    ["seed", 1.5],
+    ["presencePenalty", -3],
+    ["frequencyPenalty", 3],
+  ] as const)("rejects %s of %s", (field, value) => {
+    expect(isValidChatSampling(field, value)).toBe(false);
+  });
+
+  // Unset means the Provider or model default.
+  it("treats undefined as valid", () => {
+    expect(isValidChatSampling("topK", undefined)).toBe(true);
+  });
+});
+
 describe("Provider Create Schema", () => {
   const baseProvider = {
     organizationId: "org-123",
@@ -953,7 +1003,7 @@ describe("Provider modelIds (per-model config)", () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.modelIds).toHaveLength(1);
-        expect(result.data.modelIds![0].maxOutputTokens).toBeUndefined();
+        expect(result.data.modelIds[0].maxOutputTokens).toBeUndefined();
       }
     },
   );
@@ -1017,7 +1067,7 @@ describe("Provider modelIds (per-model config)", () => {
       // Asserted, not optional-chained: a schema that dropped `modelIds`
       // entirely would satisfy an `undefined` expectation vacuously.
       expect(result.data.modelIds).toHaveLength(1);
-      expect(result.data.modelIds![0].contextWindow).toBeUndefined();
+      expect(result.data.modelIds[0].contextWindow).toBeUndefined();
     }
   });
 
@@ -1464,6 +1514,35 @@ describe("Model reference helpers", () => {
   });
 });
 
+describe("triggerCreateSchema", () => {
+  const base = {
+    workspaceId: "ws-1",
+    agentId: "agent-1",
+    type: "cron" as const,
+    name: "My Trigger",
+    instruction: "Do the thing.",
+    config: { cronExpression: "0 * * * *" },
+  };
+
+  it("defaults an omitted maxRunsToKeep to 10, matching the trigger table column and the Trigger form (issue #1119)", () => {
+    // The trigger table column and the Trigger form both default to 10; this
+    // schema is what an HTTP create falls back to when the field is omitted,
+    // so it must agree rather than silently persisting a different default.
+    const result = triggerCreateSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.maxRunsToKeep).toBe(10);
+  });
+
+  it("keeps an explicit maxRunsToKeep as given", () => {
+    const result = triggerCreateSchema.safeParse({
+      ...base,
+      maxRunsToKeep: 3,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.maxRunsToKeep).toBe(3);
+  });
+});
+
 describe("triggerRunStatsSchema", () => {
   const base = {
     steps: 3,
@@ -1709,5 +1788,127 @@ describe("webhook event payloads", () => {
       somethingNew: "x",
     });
     expect(parsed).toMatchObject({ id: "c1", somethingNew: "x" });
+  });
+});
+
+describe("partial update schemas", () => {
+  // An update carries only the fields the caller is changing. A default filled
+  // in for an absent key would be written over the stored value.
+  it("returns only the Trigger fields that were supplied", () => {
+    expect(triggerUpdateSchema.parse({ name: "x" })).toEqual({ name: "x" });
+    expect(triggerUpdateSchema.parse({ enabled: false })).toEqual({
+      enabled: false,
+    });
+  });
+
+  it("returns only the Kanban Card fields that were supplied", () => {
+    expect(kanbanCardUpdateSchema.parse({ title: "x" })).toEqual({
+      title: "x",
+    });
+  });
+
+  it.each([
+    ["chat", chatUpdateSchema],
+    ["trigger", triggerUpdateSchema],
+    ["kanbanCard", kanbanCardUpdateSchema],
+    ["kanbanCardComment", kanbanCardCommentUpdateSchema],
+    ["dashboard", dashboardUpdateSchema],
+  ])("%s update schema parses {} to {}", (_, schema) => {
+    expect(schema.parse({})).toEqual({});
+  });
+
+  it("partialWithoutDefaults fills no default for an absent key", () => {
+    const schema = partialWithoutDefaults(
+      z.object({ a: z.string().min(1), b: z.number().default(5) }),
+    );
+    expect(schema.parse({ a: "x" })).toEqual({ a: "x" });
+    expect(schema.parse({ b: 1 })).toEqual({ b: 1 });
+    expect(schema.safeParse({ a: "" }).success).toBe(false);
+  });
+});
+
+describe("Dashboard name bounds", () => {
+  const dashboard = {
+    id: "d1",
+    workspaceId: "w1",
+    desktopLayout: [],
+    mobileLayout: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it.each([
+    [
+      "full",
+      (name: string) => dashboardSchema.safeParse({ ...dashboard, name }),
+    ],
+    ["create", (name: string) => dashboardCreateSchema.safeParse({ name })],
+    ["update", (name: string) => dashboardUpdateSchema.safeParse({ name })],
+  ])("%s schema accepts 1–200 chars and rejects outside", (_, parse) => {
+    expect(parse("a").success).toBe(true);
+    expect(parse("a".repeat(200)).success).toBe(true);
+    expect(parse("").success).toBe(false);
+    expect(parse("a".repeat(201)).success).toBe(false);
+  });
+});
+
+describe("sampling parameter bounds (#1144)", () => {
+  // [field, values that pass, values that fail]
+  const cases: [string, number[], number[]][] = [
+    ["temperature", [0, 0.7, 5], [-0.01]],
+    ["topP", [0, 1], [-0.01, 1.01, 1.5]],
+    ["topK", [1, 40], [0, 1.5]],
+    ["seed", [0, -3, 42], [1.5]],
+    ["presencePenalty", [-2, 0, 2], [-2.01, 2.01]],
+    ["frequencyPenalty", [-2, 0, 2], [-2.01, 2.01]],
+  ];
+  const schemas = {
+    agentCreateSchema,
+    agentUpdateSchema,
+    chat: chatSchema.pick({
+      temperature: true,
+      topP: true,
+      topK: true,
+      seed: true,
+      presencePenalty: true,
+      frequencyPenalty: true,
+    }),
+  };
+
+  for (const [name, schema] of Object.entries(schemas)) {
+    const shape = schema.shape as Record<string, z.ZodType>;
+    it.each(cases)(`${name}.%s enforces its bounds`, (field, ok, bad) => {
+      for (const v of ok) expect(shape[field].safeParse(v).success).toBe(true);
+      for (const v of bad)
+        expect(shape[field].safeParse(v).success, `${v}`).toBe(false);
+      expect(shape[field].safeParse(undefined).success).toBe(true);
+    });
+  }
+
+  it.each(cases)("Agent %s still accepts null", (field) => {
+    const shape = agentUpdateSchema.shape as Record<string, z.ZodType>;
+    expect(shape[field].safeParse(null).success).toBe(true);
+  });
+
+  it("rejects an out-of-range value on a Chat turn", () => {
+    const turn = {
+      id: "c1",
+      workspaceId: "w1",
+      agentId: "a1",
+      trigger: "regenerate-message",
+      messageId: "m1",
+    };
+    expect(chatSubmitSchema.safeParse({ ...turn, topP: 1 }).success).toBe(true);
+    expect(chatSubmitSchema.safeParse({ ...turn, topP: 1.5 }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe("chatUpdateSchema", () => {
+  it("accepts a lone field and returns only what was supplied", () => {
+    expect(chatUpdateSchema.parse({ isPinned: true })).toEqual({
+      isPinned: true,
+    });
   });
 });

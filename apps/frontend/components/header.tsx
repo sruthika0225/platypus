@@ -3,6 +3,16 @@ import { ModeToggle } from "@/components/mode-toggle";
 import { NotificationsDropdown } from "@/components/notifications-dropdown";
 import { cn } from "@/lib/utils";
 import { type Scope } from "@/lib/api-write";
+import { workspaceSettingsLinks } from "@/lib/settings-links";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Settings } from "lucide-react";
+import Link from "next/link";
 
 interface HeaderProps {
   leftContent?: React.ReactNode;
@@ -38,8 +48,48 @@ export function Header({
           workspaceId={scope?.workspaceId}
         />
         <ModeToggle />
-        <UserMenu orgId={scope?.orgId} workspaceId={scope?.workspaceId} />
+        {scope?.workspaceId && (
+          <WorkspaceSettingsDropdown
+            orgId={scope.orgId}
+            workspaceId={scope.workspaceId}
+          />
+        )}
+        <UserMenu />
       </div>
     </header>
+  );
+}
+
+function WorkspaceSettingsDropdown({
+  orgId,
+  workspaceId,
+}: {
+  orgId: string;
+  workspaceId: string;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Workspace settings"
+          className="size-7 cursor-pointer"
+        >
+          <Settings className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {workspaceSettingsLinks(orgId, workspaceId).map(
+          ({ href, icon: Icon, label }) => (
+            <DropdownMenuItem key={href} asChild className="cursor-pointer">
+              <Link href={href}>
+                <Icon className="size-4" /> {label}
+              </Link>
+            </DropdownMenuItem>
+          ),
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

@@ -13,7 +13,7 @@ import {
   MessageSquare,
   Wrench,
 } from "lucide-react";
-import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 import {
   TRIGGER_RUN_STATUS_LABELS,
   type TriggerRunStats,
@@ -122,14 +122,7 @@ export const TriggerRunRow = ({
 }) => {
   const stats = run.stats as TriggerRunStats | null | undefined;
 
-  const handleCopyRunId = async () => {
-    try {
-      await navigator.clipboard.writeText(run.id);
-      toast.success("Copied to clipboard");
-    } catch {
-      toast.error("Failed to copy to clipboard");
-    }
-  };
+  const handleCopyRunId = () => copyWithToast(run.id);
 
   const toolCallCount =
     stats?.toolCalls.reduce((sum, tc) => sum + tc.count, 0) ?? 0;

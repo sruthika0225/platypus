@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +12,8 @@ import {
 import { Button } from "./ui/button";
 import { Alert, AlertTitle, AlertDescription } from "./ui/alert";
 import { TriangleAlert, Copy, Check } from "lucide-react";
+import { useTimeout } from "@/hooks/use-timeout";
+import { copyWithToast } from "@/lib/clipboard";
 
 interface ChatErrorDialogProps {
   isOpen: boolean;
@@ -25,29 +27,13 @@ export const ChatErrorDialog = ({
   error,
 }: ChatErrorDialogProps) => {
   const [copied, setCopied] = useState(false);
-  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-        copyTimeoutRef.current = null;
-      }
-    };
-  }, []);
+  const scheduleCopiedReset = useTimeout();
   const message = error?.message || "An unknown error occurred.";
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(message);
+  const handleCopy = async () => {
+    if (!(await copyWithToast(message, false))) return;
     setCopied(true);
-    if (copyTimeoutRef.current) {
-      clearTimeout(copyTimeoutRef.current);
-    }
-
-    copyTimeoutRef.current = setTimeout(() => {
-      setCopied(false);
-      copyTimeoutRef.current = null;
-    }, 2000);
+    scheduleCopiedReset(() => setCopied(false), 2000);
   };
 
   return (
@@ -62,12 +48,17 @@ export const ChatErrorDialog = ({
         <div className="py-4">
           <Alert variant="destructive">
             <TriangleAlert />
-            <AlertTitle>Error Details</AlertTitle>
+            <AlertTitle>Error details</AlertTitle>
             <AlertDescription className="break-all">{message}</AlertDescription>
           </Alert>
         </div>
         <DialogFooter className="flex-row justify-end">
-          <Button variant="outline" size="icon" onClick={handleCopy}>
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label="Copy error details"
+            onClick={handleCopy}
+          >
             {copied ? <Check /> : <Copy />}
           </Button>
           <Button onClick={() => onOpenChange(false)}>Ok</Button>

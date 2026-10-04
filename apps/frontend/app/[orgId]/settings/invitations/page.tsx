@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Trash2, Mail, Copy } from "lucide-react";
 import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 import { useBackendUrl } from "@/components/auth-provider";
 import { useScopedSWR } from "@/hooks/use-scoped-swr";
 import { formatDate } from "@/lib/format-date";
@@ -63,12 +64,11 @@ const OrgInvitationsPage = () => {
   // so there is nothing useful left to copy.
   const handleCopyLink = async (token: string) => {
     const link = `${window.location.origin}/invite/${token}`;
-    try {
-      await navigator.clipboard.writeText(link);
-      toast.success("Invitation link copied");
-    } catch {
-      toast.error("Could not copy the invitation link");
-    }
+    await copyWithToast(
+      link,
+      "Invitation link copied",
+      "Could not copy the invitation link",
+    );
   };
 
   const handleDelete = async () => {
@@ -231,6 +231,7 @@ const OrgInvitationsPage = () => {
                           <Button
                             variant="ghost"
                             size="icon"
+                            aria-label="Copy invitation link"
                             className="cursor-pointer"
                             title="Copy invitation link"
                             onClick={() => handleCopyLink(invite.token!)}
@@ -241,6 +242,7 @@ const OrgInvitationsPage = () => {
                         <Button
                           variant="ghost"
                           size="icon"
+                          aria-label={`Delete invitation for ${invite.email}`}
                           className="text-destructive hover:text-destructive hover:bg-destructive/10 cursor-pointer"
                           onClick={() => setInvitationToDelete(invite.id)}
                         >

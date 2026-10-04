@@ -157,7 +157,7 @@ mcp.post(
     const scope = workspaceScopeOf(c);
 
     let storedMcp = null;
-    if (data.authType === "OAuth" && data.mcpId) {
+    if (data.mcpId) {
       const found = await resolveScoped(db, "mcp", data.mcpId, scope);
       storedMcp = found?.row ?? null;
     }
@@ -230,7 +230,7 @@ mcp.post(
       workspaceScopedWhere("mcp", mcpId, scope.workspaceId),
     );
 
-    return c.json({ success: true });
+    return c.json({ message: "OAuth authorization revoked" });
   },
 );
 

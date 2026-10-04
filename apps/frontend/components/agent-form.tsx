@@ -29,6 +29,7 @@ import { useResetOnChange } from "@/hooks/use-reset-on-change";
 import { useEntityDelete, useEntityForm } from "@/hooks/use-entity-form";
 import Link from "next/link";
 import { ChevronsUpDown, ImageIcon, Camera, X, Building } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -43,6 +44,12 @@ import {
   AGENT_INPUT_PLACEHOLDER_MAX_LENGTH,
   AGENT_MAX_STEPS_MIN,
   DEFAULT_AGENT_MAX_STEPS,
+  PENALTY_MAX,
+  PENALTY_MIN,
+  TEMPERATURE_MIN,
+  TOP_K_MIN,
+  TOP_P_MAX,
+  TOP_P_MIN,
   type ToolSet,
   type Agent,
   type Provider,
@@ -429,20 +436,23 @@ const AgentForm = ({
   const form = (
     <div className={classNames}>
       {readOnly && (
-        <div className="mb-6 rounded-md border bg-secondary/50 p-3 text-sm flex items-center gap-2">
-          <Building className="size-4 shrink-0" />
-          <span>
-            This is a shared organization agent and is read-only here. Edit it
-            in{" "}
-            <Link
-              href={orgRoutes(orgId).settings.agentDetail(agentId!)}
-              className="underline"
-            >
-              Organization settings
-            </Link>
-            .
-          </span>
-        </div>
+        <Alert className="mb-6">
+          <Building />
+          <AlertTitle>Read-only</AlertTitle>
+          <AlertDescription>
+            <span>
+              This is a shared organization agent and is read-only here. Edit it
+              in{" "}
+              <Link
+                href={orgRoutes(orgId).settings.agentDetail(agentId!)}
+                className="underline"
+              >
+                Organization settings
+              </Link>
+              .
+            </span>
+          </AlertDescription>
+        </Alert>
       )}
       <FieldSet className="mb-6">
         <div className="flex flex-col items-center">
@@ -830,7 +840,7 @@ const AgentForm = ({
                 label="Temperature"
                 name="temperature"
                 type="number"
-                min="0"
+                min={TEMPERATURE_MIN}
                 step="0.1"
                 value={String(formData.temperature ?? "")}
                 onChange={(value) => setFloatField("temperature", value)}
@@ -850,8 +860,8 @@ const AgentForm = ({
                 label="Top-p"
                 name="topP"
                 type="number"
-                min="0"
-                max="1"
+                min={TOP_P_MIN}
+                max={TOP_P_MAX}
                 step="0.1"
                 value={String(formData.topP ?? "")}
                 onChange={(value) => setFloatField("topP", value)}
@@ -862,7 +872,7 @@ const AgentForm = ({
                 label="Top-k"
                 name="topK"
                 type="number"
-                min="1"
+                min={TOP_K_MIN}
                 value={String(formData.topK ?? "")}
                 onChange={(value) => setNumberField("topK", value)}
                 disabled={isSubmitting || readOnly}
@@ -872,8 +882,8 @@ const AgentForm = ({
                 label="Presence Penalty"
                 name="presencePenalty"
                 type="number"
-                min="-2"
-                max="2"
+                min={PENALTY_MIN}
+                max={PENALTY_MAX}
                 step="0.1"
                 value={String(formData.presencePenalty ?? "")}
                 onChange={(value) => setFloatField("presencePenalty", value)}
@@ -884,8 +894,8 @@ const AgentForm = ({
                 label="Frequency Penalty"
                 name="frequencyPenalty"
                 type="number"
-                min="-2"
-                max="2"
+                min={PENALTY_MIN}
+                max={PENALTY_MAX}
                 step="0.1"
                 value={String(formData.frequencyPenalty ?? "")}
                 onChange={(value) => setFloatField("frequencyPenalty", value)}

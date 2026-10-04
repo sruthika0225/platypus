@@ -2,6 +2,27 @@ import { z } from "zod";
 
 const kebabCaseRegex = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+// Every partial update schema is built with this rather than `.partial()`: in
+// Zod 4 a `.default()` still fills an absent key after `.partial()`, so an
+// update touching one field would write every other defaulted field back to its
+// default. This drops each field's top-level `.default()`, so a parsed update
+// holds exactly the keys the caller sent.
+export const partialWithoutDefaults = <Shape extends z.ZodRawShape>(
+  schema: z.ZodObject<Shape>,
+) =>
+  schema.extend(
+    Object.fromEntries(
+      Object.entries(schema.shape).map(([key, field]) => [
+        key,
+        z.optional(field instanceof z.ZodDefault ? field.unwrap() : field),
+      ]),
+    ),
+  ) as unknown as z.ZodObject<{
+    [K in keyof Shape]: z.ZodOptional<
+      Shape[K] extends z.ZodDefault<infer Inner> ? Inner : Shape[K]
+    >;
+  }>;
+
 // Shared free-text bounds, exported so the forms' `maxLength` attributes read
 // the same source as the server rule.
 //
@@ -12,6 +33,27 @@ export const ORGANIZATION_IDENTITY_CONTEXT_MAX_LENGTH = 4000;
 export const CONTEXT_MAX_LENGTH = 1000;
 
 // Organization
+
+/**
+ * Which Workspaces an Organization lets take Inbound Trigger calls
+ * (ADR-0030): none, every one, or those with `inboundTriggersAllowed` set.
+ */
+export const inboundTriggerGateSchema = z.enum(["off", "all", "selected"]);
+
+export type InboundTriggerGate = z.infer<typeof inboundTriggerGateSchema>;
+
+/**
+ * How an Inbound Trigger's token stands: no token (never issued, or revoked),
+ * active, expiring within 7 days, or expired. Worked out by the backend.
+ */
+export const inboundTokenStatusSchema = z.enum([
+  "none",
+  "active",
+  "expiring",
+  "expired",
+]);
+
+export type InboundTokenStatus = z.infer<typeof inboundTokenStatusSchema>;
 
 export const organizationSchema = z.object({
   id: z.string(),
@@ -25,6 +67,10 @@ export const organizationSchema = z.object({
     .max(ORGANIZATION_IDENTITY_CONTEXT_MAX_LENGTH)
     .nullable()
     .optional(),
+  // Which Workspaces may take calls on an Inbound Trigger (ADR-0030). `off`
+  // by default; `selected` defers to each Workspace's
+  // `inboundTriggersAllowed`. Settable only by an Org Admin.
+  inboundTriggerGate: inboundTriggerGateSchema.optional(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
@@ -33,10 +79,45 @@ export type Organization = z.infer<typeof organizationSchema>;
 
 export const organizationCreateSchema = organizationSchema.pick({ name: true });
 
+// The Inbound Trigger gate is not here: it is saved with the per-Workspace
+// switches on the Organization's Inbound Triggers screen
+// (`inboundTriggerAccessUpdateSchema`), so one place owns it.
 export const organizationUpdateSchema = organizationSchema.pick({
   name: true,
   identityContext: true,
 });
+
+/**
+ * Who may take Inbound Trigger calls, as an Org Admin saves it (ADR-0030).
+ * `allowedWorkspaceIds` sets every Workspace's `inboundTriggersAllowed` in
+ * the same write — on for those listed, off for the rest — so switching to
+ * `selected` never refuses calls between two saves. Omitted, the switches
+ * stay as they are.
+ */
+export const inboundTriggerAccessUpdateSchema = z.object({
+  gate: inboundTriggerGateSchema,
+  allowedWorkspaceIds: z.array(z.string()).max(10_000).optional(),
+});
+
+export type InboundTriggerAccessUpdate = z.infer<
+  typeof inboundTriggerAccessUpdateSchema
+>;
+
+/** One Workspace as the Inbound Triggers screen lists it. */
+export const inboundTriggerAccessWorkspaceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  ownerName: z.string(),
+  allowed: z.boolean(),
+  inboundTriggerCount: z.number().int(),
+});
+
+export const inboundTriggerAccessSchema = z.object({
+  gate: inboundTriggerGateSchema,
+  workspaces: z.array(inboundTriggerAccessWorkspaceSchema),
+});
+
+export type InboundTriggerAccess = z.infer<typeof inboundTriggerAccessSchema>;
 
 // Workspace
 
@@ -73,6 +154,10 @@ export const workspaceSchema = z.object({
   // respective resource.
   providerSelfManagement: z.boolean().optional(),
   mcpSelfManagement: z.boolean().optional(),
+  // Whether this Workspace's Inbound Triggers are reachable while the
+  // Organization gate is `selected` (ADR-0030). Settable only by an org admin;
+  // ignored under `off` and `all`.
+  inboundTriggersAllowed: z.boolean().optional(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
@@ -88,6 +173,7 @@ export const workspaceUpdateSchema = workspaceSchema.pick({
   maxDailySummaries: true,
   providerSelfManagement: true,
   mcpSelfManagement: true,
+  inboundTriggersAllowed: true,
 });
 
 // Chat
@@ -118,6 +204,27 @@ export const CHAT_MAX_STEPS_MAX = 50;
  */
 export const UNTITLED_CHAT_TITLE = "Untitled";
 
+/**
+ * Bounds on the sampling parameters an Agent or a Chat can set. Temperature has
+ * no ceiling because it varies by Provider. Exported so the Agent form and the
+ * Chat settings inputs enforce the same numbers the API does.
+ */
+export const TEMPERATURE_MIN = 0;
+export const TOP_P_MIN = 0;
+export const TOP_P_MAX = 1;
+export const TOP_K_MIN = 1;
+export const PENALTY_MIN = -2;
+export const PENALTY_MAX = 2;
+
+const samplingFields = {
+  temperature: z.number().min(TEMPERATURE_MIN),
+  topP: z.number().min(TOP_P_MIN).max(TOP_P_MAX),
+  topK: z.number().int().min(TOP_K_MIN),
+  seed: z.number().int(),
+  presencePenalty: z.number().min(PENALTY_MIN).max(PENALTY_MAX),
+  frequencyPenalty: z.number().min(PENALTY_MIN).max(PENALTY_MAX),
+};
+
 export const chatSchema = z.object({
   id: z.string(),
   workspaceId: z.string(),
@@ -139,12 +246,12 @@ export const chatSchema = z.object({
   providerId: z.string().optional(),
   modelId: z.string().optional(),
   instructions: z.string().optional(),
-  temperature: z.number().optional(),
-  topP: z.number().optional(),
-  topK: z.number().optional(),
-  seed: z.number().optional(),
-  presencePenalty: z.number().optional(),
-  frequencyPenalty: z.number().optional(),
+  temperature: samplingFields.temperature.optional(),
+  topP: samplingFields.topP.optional(),
+  topK: samplingFields.topK.optional(),
+  seed: samplingFields.seed.optional(),
+  presencePenalty: samplingFields.presencePenalty.optional(),
+  frequencyPenalty: samplingFields.frequencyPenalty.optional(),
   // Per-chat step ceiling for Direct (no-Agent) turns (#539). Nullable like
   // its six sampling neighbours rather than shaped like the Agent's own
   // `maxSteps`, so a client that clears a field by sending an explicit null
@@ -179,6 +286,19 @@ export type Chat = z.infer<typeof chatSchema>;
 export const isValidChatMaxSteps = (
   value: number | null | undefined,
 ): boolean => chatSchema.shape.maxSteps.safeParse(value).success;
+
+export type ChatSamplingField = keyof typeof samplingFields;
+
+/**
+ * Whether a Chat sampling value is one the turn endpoint will accept. Like
+ * {@link isValidChatMaxSteps}, decided by `chatSchema` itself so the settings
+ * inputs and the send guard cannot drift from the request validator. Unset
+ * (undefined) is valid — it means the Provider or model default.
+ */
+export const isValidChatSampling = (
+  field: ChatSamplingField,
+  value: number | undefined,
+): boolean => chatSchema.shape[field].safeParse(value).success;
 
 const chatTurnSchema = chatSchema
   .pick({
@@ -285,12 +405,14 @@ export const chatActiveLeafSchema = z.object({
   messageId: z.string().min(1),
 });
 
-export const chatUpdateSchema = chatSchema.pick({
-  workspaceId: true,
-  title: true,
-  isPinned: true,
-  tags: true,
-});
+export const chatUpdateSchema = partialWithoutDefaults(
+  chatSchema.pick({
+    workspaceId: true,
+    title: true,
+    isPinned: true,
+    tags: true,
+  }),
+);
 
 export type ChatSubmitData = z.infer<typeof chatSubmitSchema>;
 
@@ -387,12 +509,12 @@ export const agentBaseSchema = z.object({
   // (null) — without null, JSON.stringify drops the cleared `undefined` key
   // and the column keeps its previous value (#263). null is treated as "unset"
   // at run time, falling back to the provider/model default.
-  temperature: z.number().nullable().optional(),
-  topP: z.number().nullable().optional(),
-  topK: z.number().nullable().optional(),
-  seed: z.number().nullable().optional(),
-  presencePenalty: z.number().nullable().optional(),
-  frequencyPenalty: z.number().nullable().optional(),
+  temperature: samplingFields.temperature.nullable().optional(),
+  topP: samplingFields.topP.nullable().optional(),
+  topK: samplingFields.topK.nullable().optional(),
+  seed: samplingFields.seed.nullable().optional(),
+  presencePenalty: samplingFields.presencePenalty.nullable().optional(),
+  frequencyPenalty: samplingFields.frequencyPenalty.nullable().optional(),
   toolSetIds: z.array(z.string()).optional(),
   skillIds: z.array(z.string()).optional(),
   subAgentIds: z.array(z.string()).optional(),
@@ -1879,7 +2001,8 @@ export const invitationSchema = z.object({
   id: z.string(),
   email: z.string().email(),
   organizationId: z.string(),
-  invitedBy: z.string(),
+  // Null once the inviter's account has been deleted.
+  invitedBy: z.string().nullable(),
   status: invitationStatusSchema,
   // Optional name for the Workspace provisioned when this invitation is
   // accepted (ADR-0008). When null/omitted the accept handler defaults it to
@@ -1912,7 +2035,7 @@ export const invitationCreateSchema = invitationSchema.pick({
 
 export const invitationListItemSchema = invitationSchema.extend({
   organizationName: z.string().optional(),
-  invitedByName: z.string().optional(),
+  invitedByName: z.string().nullable().optional(),
 });
 
 export type InvitationListItem = z.infer<typeof invitationListItemSchema>;
@@ -2079,7 +2202,7 @@ export type WebhookEvent = z.infer<typeof webhookEventSchema>;
 
 // Trigger
 
-export const triggerTypeSchema = z.enum(["cron", "event"]);
+export const triggerTypeSchema = z.enum(["cron", "event", "inbound"]);
 
 export type TriggerType = z.infer<typeof triggerTypeSchema>;
 
@@ -2103,6 +2226,90 @@ export const eventTriggerConfigSchema = z.object({
 });
 
 export type EventTriggerConfig = z.infer<typeof eventTriggerConfigSchema>;
+
+// Inbound Trigger (ADR-0030): fired by an authenticated call to
+// `POST /hooks/triggers/:triggerId` rather than a schedule or a Webhook event.
+
+export const INBOUND_TRIGGER_MAX_INPUTS = 10;
+export const INBOUND_TRIGGER_INPUT_NAME_MAX_LENGTH = 64;
+export const INBOUND_TRIGGER_INPUT_DESCRIPTION_MAX_LENGTH = 500;
+
+/** The token lifetimes an Owner picks from, in days. */
+export const INBOUND_TRIGGER_TOKEN_EXPIRY_DAYS = [30, 90, 180, 365] as const;
+export const DEFAULT_INBOUND_TRIGGER_TOKEN_EXPIRY_DAYS = 90;
+
+/**
+ * An input's name is an identifier, so the Instruction can refer to it by name
+ * and the caller's JSON key is unambiguous.
+ */
+export const inboundTriggerInputNameRegex = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export const inboundTriggerInputSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(INBOUND_TRIGGER_INPUT_NAME_MAX_LENGTH)
+    .regex(
+      inboundTriggerInputNameRegex,
+      "Input names start with a letter or underscore and contain only letters, digits and underscores",
+    ),
+  required: z.boolean().default(false),
+  description: z
+    .string()
+    .max(INBOUND_TRIGGER_INPUT_DESCRIPTION_MAX_LENGTH)
+    .optional(),
+});
+
+export type InboundTriggerInput = z.infer<typeof inboundTriggerInputSchema>;
+
+// Strict, unlike the cron and event configs: every field here has a default,
+// so a non-strict schema would read any other shape — a cron config sent for
+// an Inbound Trigger — as a valid config with no inputs.
+export const inboundTriggerConfigSchema = z
+  .strictObject({
+    inputs: z
+      .array(inboundTriggerInputSchema)
+      .max(INBOUND_TRIGGER_MAX_INPUTS)
+      .default([]),
+    /**
+     * The one required input that identifies the record a call is about (an
+     * issue key). The run-rate breaker counts per value of it, and a call for a
+     * record that already has an active run returns that run instead.
+     */
+    recordKey: z.string().optional(),
+    /**
+     * The lifetime the next token is issued with. Changing it does not move the
+     * current token's expiry; regenerating does.
+     */
+    tokenExpiryDays: z
+      .literal(INBOUND_TRIGGER_TOKEN_EXPIRY_DAYS)
+      .default(DEFAULT_INBOUND_TRIGGER_TOKEN_EXPIRY_DAYS),
+  })
+  .superRefine((config, ctx) => {
+    const seen = new Set<string>();
+    config.inputs.forEach((input, index) => {
+      if (seen.has(input.name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["inputs", index, "name"],
+          message: `Input '${input.name}' is declared more than once`,
+        });
+      }
+      seen.add(input.name);
+    });
+    if (config.recordKey !== undefined) {
+      const keyInput = config.inputs.find((i) => i.name === config.recordKey);
+      if (!keyInput?.required) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["recordKey"],
+          message: "The record key must name a required input",
+        });
+      }
+    }
+  });
+
+export type InboundTriggerConfig = z.infer<typeof inboundTriggerConfigSchema>;
 
 // The bounds the Trigger form's `maxLength` / `min` / `max` attributes read.
 export const TRIGGER_NAME_MIN_LENGTH = 1;
@@ -2130,25 +2337,38 @@ export const triggerSchema = z.object({
     .int()
     .min(TRIGGER_MAX_RUNS_TO_KEEP_MIN)
     .max(TRIGGER_MAX_RUNS_TO_KEEP_MAX)
-    .default(50),
+    .default(10),
   search: z.boolean().default(false),
   // Whether a firing composes the `<memories>` block. Off by default: a
   // headless run should not have a system prompt that drifts with the
   // Workspace User's unrelated interactive-chat activity.
   includeMemories: z.boolean().default(false),
-  config: z.union([cronTriggerConfigSchema, eventTriggerConfigSchema]),
+  // The stored shape, for reading. Writes are validated against the schema
+  // their `type` selects (see `triggerCreateSchema`), never by this union.
+  config: z.union([
+    cronTriggerConfigSchema,
+    eventTriggerConfigSchema,
+    inboundTriggerConfigSchema,
+  ]),
   lastRunAt: z.date().nullable().optional(),
   nextRunAt: z.date().nullable().optional(),
+  // Inbound Triggers only. The token itself is never returned after it is
+  // issued; these describe it.
+  hasToken: z.boolean().optional(),
+  tokenStatus: inboundTokenStatusSchema.optional(),
+  tokenCreatedAt: z.date().nullable().optional(),
+  tokenExpiresAt: z.date().nullable().optional(),
+  lastUsedAt: z.date().nullable().optional(),
+  lastRejectedAt: z.date().nullable().optional(),
   createdAt: z.date(),
   updatedAt: z.date(),
 });
 
 export type Trigger = z.infer<typeof triggerSchema>;
 
-export const triggerCreateSchema = triggerSchema.pick({
+const triggerCreateBaseSchema = triggerSchema.pick({
   workspaceId: true,
   agentId: true,
-  type: true,
   name: true,
   description: true,
   instruction: true,
@@ -2156,23 +2376,45 @@ export const triggerCreateSchema = triggerSchema.pick({
   maxRunsToKeep: true,
   search: true,
   includeMemories: true,
-  config: true,
 });
 
-export const triggerUpdateSchema = triggerSchema
-  .pick({
+/**
+ * A create names its type, and its config is validated against that type's
+ * schema alone — never against whichever member of a union happens to accept
+ * it first.
+ */
+export const triggerCreateSchema = z.discriminatedUnion("type", [
+  triggerCreateBaseSchema.extend({
+    type: z.literal("cron"),
+    config: cronTriggerConfigSchema,
+  }),
+  triggerCreateBaseSchema.extend({
+    type: z.literal("event"),
+    config: eventTriggerConfigSchema,
+  }),
+  triggerCreateBaseSchema.extend({
+    type: z.literal("inbound"),
+    config: inboundTriggerConfigSchema,
+  }),
+]);
+
+export const triggerUpdateSchema = partialWithoutDefaults(
+  triggerSchema.pick({
     name: true,
     description: true,
     instruction: true,
+    agentId: true,
+    type: true,
     enabled: true,
     maxRunsToKeep: true,
-    agentId: true,
     search: true,
     includeMemories: true,
-    type: true,
-    config: true,
-  })
-  .partial();
+  }),
+).extend({
+  // An update may omit `type`, so only the stored Trigger settles which
+  // schema its config must meet: the backend validates it against that.
+  config: z.record(z.string(), z.unknown()).optional(),
+});
 
 // Trigger Run
 
@@ -2605,16 +2847,16 @@ export const kanbanCardCreateSchema = kanbanCardSchema.pick({
   priority: true,
 });
 
-export const kanbanCardUpdateSchema = kanbanCardSchema
-  .pick({
+export const kanbanCardUpdateSchema = partialWithoutDefaults(
+  kanbanCardSchema.pick({
     title: true,
     body: true,
+    dueDate: true,
     labelIds: true,
     assignees: true,
-    dueDate: true,
     priority: true,
-  })
-  .partial();
+  }),
+);
 
 export const kanbanCardMoveSchema = z.object({
   columnId: z.string(),
@@ -2644,9 +2886,9 @@ export const kanbanCardCommentCreateSchema = kanbanCardCommentSchema.pick({
   body: true,
 });
 
-export const kanbanCardCommentUpdateSchema = kanbanCardCommentSchema
-  .pick({ body: true })
-  .partial();
+export const kanbanCardCommentUpdateSchema = partialWithoutDefaults(
+  kanbanCardCommentSchema.pick({ body: true }),
+);
 
 export type KanbanCardComment = z.infer<typeof kanbanCardCommentSchema>;
 
@@ -2816,7 +3058,7 @@ export * from "./widget-registry.ts";
 export const dashboardSchema = z.object({
   id: z.string(),
   workspaceId: z.string(),
-  name: z.string(),
+  name: z.string().min(1).max(200),
   description: z.string().max(500).nullable().optional(),
   desktopLayout: z.array(rglLayoutItemSchema),
   mobileLayout: z.array(rglLayoutItemSchema),
@@ -2826,17 +3068,19 @@ export const dashboardSchema = z.object({
 
 export type Dashboard = z.infer<typeof dashboardSchema>;
 
-export const dashboardCreateSchema = z.object({
-  name: z.string().min(1).max(200),
-  description: z.string().max(500).nullable().optional(),
+export const dashboardCreateSchema = dashboardSchema.pick({
+  name: true,
+  description: true,
 });
 
-export const dashboardUpdateSchema = z.object({
-  name: z.string().min(1).max(200).optional(),
-  description: z.string().max(500).nullable().optional(),
-  desktopLayout: z.array(rglLayoutItemSchema).optional(),
-  mobileLayout: z.array(rglLayoutItemSchema).optional(),
-});
+export const dashboardUpdateSchema = partialWithoutDefaults(
+  dashboardSchema.pick({
+    name: true,
+    description: true,
+    desktopLayout: true,
+    mobileLayout: true,
+  }),
+);
 
 // --- Webhook event payloads --------------------------------------------------
 

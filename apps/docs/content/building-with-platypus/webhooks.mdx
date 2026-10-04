@@ -16,7 +16,7 @@ Where a [Trigger](/building-with-platypus/triggers) runs an Agent _inside_
 Platypus in response to an event, a Webhook sends that same event _out_ to your
 own service. Both subscribe to the same set of events.
 
-You'll find Webhooks under **Settings → Webhooks** in your Workspace.
+You'll find Webhooks under **Workspace settings → Webhooks**.
 
 ## Subscribable events
 
@@ -33,8 +33,8 @@ A Webhook subscribes to one or more events. The available events are:
 | `notification.read`      | A notification is marked read.                                |
 | `notification.dismissed` | A notification is dismissed.                                  |
 
-If you don't pick any events when creating a Webhook, it subscribes to all of
-them.
+Every event starts selected on a new Webhook; turn off the ones you don't want.
+A Webhook needs at least one.
 
 ## Create a Webhook
 
@@ -42,7 +42,7 @@ them.
 
 ### Open the Webhook form
 
-In your Workspace, go to **Settings → Webhooks** and click **Add webhook**.
+Go to **Workspace settings → Webhooks** and click **Add webhook**.
 
 ### Configure the endpoint
 
@@ -51,10 +51,11 @@ In your Workspace, go to **Settings → Webhooks** and click **Add webhook**.
   deployment's [egress guard](/self-hosting/configuration#the-egress-guard):
   loopback and cloud-metadata addresses are refused, and so are private
   networks if your Operator has turned them off. A refused URL fails on save.
-- **Events** — which events to subscribe to (defaults to all).
-- **Headers** — optional custom headers sent with every delivery (e.g. an
-  `Authorization` header your endpoint expects).
 - **Enabled** — leave on to start delivering immediately.
+- **Events** — which events to subscribe to (all start selected).
+- **Custom Headers** — optional headers sent with every delivery (e.g. an
+  `Authorization` header your endpoint expects). Click **Add header** for each
+  one.
 
 ### Save, then reopen to get the signing secret
 
@@ -305,7 +306,9 @@ Every delivery includes:
 | `X-Webhook-Signature` | HMAC-SHA256 of the raw request body, hex-encoded.        |
 | `X-Webhook-Timestamp` | ISO 8601 timestamp, identical to the body's `timestamp`. |
 
-Any custom **Headers** you configured on the Webhook are sent alongside these.
+Any **Custom Headers** you configured on the Webhook are sent alongside these.
+A custom header with the same name replaces Platypus's own, so don't reuse
+`X-Webhook-Signature` or `X-Webhook-Timestamp` — verification then fails.
 
 ## Verifying the signature
 
@@ -350,14 +353,15 @@ const ok = verify(rawBody, req.headers["x-webhook-signature"], signingSecret);
   given up.
 - Redirects are **not followed**. A `3xx` response counts as a failure, so point
   the Webhook at the final URL.
-- Every attempt re-checks the URL against the egress guard. If its hostname
-  now resolves somewhere the guard refuses, the delivery is dropped without
-  retrying.
+- Every attempt re-checks the URL against the egress guard. If the hostname
+  doesn't resolve, or resolves somewhere the guard refuses, the delivery is
+  dropped without retrying.
 - Disabled Webhooks, and Webhooks not subscribed to the event, are skipped.
 
 <Callout type="info">
-  Your endpoint should be idempotent — a retried delivery sends the same body,
-  so process the same `data.id` / event more than once safely.
+  Your endpoint should be idempotent. A retry sends the identical body, with the
+  same `timestamp` and signature, so processing the same body twice must be
+  safe.
 </Callout>
 
 ## Where to next

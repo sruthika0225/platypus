@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { Suspense } from "react";
 import type { TriggerRunStats, TriggerRunWithTrigger } from "@platypus/schemas";
@@ -551,6 +551,13 @@ describe("Trigger runs copy-run-id control", () => {
   beforeEach(() => {
     writeText.mockReset().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
+    vi.stubGlobal("isSecureContext", true);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    // jsdom has no execCommand; drop the one a test installed.
+    Reflect.deleteProperty(document, "execCommand");
   });
 
   it("never renders the run id as visible text", async () => {
@@ -580,8 +587,12 @@ describe("Trigger runs copy-run-id control", () => {
     expect(toastSuccessSpy).toHaveBeenCalledWith("Copied to clipboard");
   });
 
-  it("shows an error toast when the clipboard write rejects", async () => {
+  it("shows an error toast when neither the clipboard nor the fallback copies", async () => {
     writeText.mockReset().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(document, "execCommand", {
+      value: vi.fn(() => false),
+      configurable: true,
+    });
     await renderRuns([run()]);
 
     await act(async () => {

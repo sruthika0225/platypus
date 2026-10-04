@@ -30,6 +30,7 @@ import { joinUrl } from "@/lib/utils";
 import { retractExactKeys } from "@/lib/form-errors";
 import { writeAt } from "@/lib/api-write";
 import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 import { useBackendUrl } from "@/components/auth-provider";
 import { Eye, EyeOff, Copy, RefreshCw, Plus, X } from "lucide-react";
 import { workspaceRoutes } from "@/lib/routes";
@@ -246,10 +247,11 @@ const WebhookForm = ({ orgId, workspaceId, webhookId }: WebhookFormProps) => {
   };
 
   const handleCopySecret = async () => {
-    if (webhook?.signingSecret) {
-      await navigator.clipboard.writeText(webhook.signingSecret);
-      toast.success("Signing secret copied to clipboard");
-    }
+    if (!webhook?.signingSecret) return;
+    await copyWithToast(
+      webhook.signingSecret,
+      "Signing secret copied to clipboard",
+    );
   };
 
   const headerRowErrorKey = (key: string) => `headers.${key}`;
@@ -394,6 +396,8 @@ const WebhookForm = ({ orgId, workspaceId, webhookId }: WebhookFormProps) => {
                   type="button"
                   variant="outline"
                   size="icon"
+                  aria-label="Show signing secret"
+                  aria-pressed={showSecret}
                   className="shrink-0 cursor-pointer"
                   onClick={() => setShowSecret(!showSecret)}
                 >
@@ -407,6 +411,7 @@ const WebhookForm = ({ orgId, workspaceId, webhookId }: WebhookFormProps) => {
                   type="button"
                   variant="outline"
                   size="icon"
+                  aria-label="Copy signing secret"
                   className="shrink-0 cursor-pointer"
                   onClick={handleCopySecret}
                 >
@@ -464,6 +469,7 @@ const WebhookForm = ({ orgId, workspaceId, webhookId }: WebhookFormProps) => {
                         type="button"
                         variant="outline"
                         size="icon"
+                        aria-label="Remove header"
                         className="shrink-0 cursor-pointer"
                         onClick={() => removeHeader(index)}
                         disabled={isSubmitting}

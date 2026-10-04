@@ -136,18 +136,15 @@ const McpForm = ({
     error?: string;
   } | null>(null);
   const [isAuthorizing, setIsAuthorizing] = useState(false);
+  // Polls the OAuth popup until it closes. One at a time, and never past
+  // unmount.
+  const popupPollRef = useRef<ReturnType<typeof setInterval>>(undefined);
+  const stopPopupPoll = () => {
+    clearInterval(popupPollRef.current);
+    popupPollRef.current = undefined;
+  };
+  useEffect(() => stopPopupPoll, []);
   const [isRevoking, setIsRevoking] = useState(false);
-
-  const oauthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (oauthIntervalRef.current) {
-        clearInterval(oauthIntervalRef.current);
-        oauthIntervalRef.current = null;
-      }
-    };
-  }, []);
 
   const router = useRouter();
 
@@ -448,16 +445,10 @@ const McpForm = ({
         } else {
           // Reset Authorize button when popup closes without success
           // (e.g. upstream provider rejects with 400 — no postMessage fires).
-          if (oauthIntervalRef.current) {
-            clearInterval(oauthIntervalRef.current);
-          }
-
-          oauthIntervalRef.current = setInterval(() => {
+          stopPopupPoll();
+          popupPollRef.current = setInterval(() => {
             if (popup.closed) {
-              if (oauthIntervalRef.current) {
-                clearInterval(oauthIntervalRef.current);
-                oauthIntervalRef.current = null;
-              }
+              stopPopupPoll();
               setIsAuthorizing(false);
             }
           }, 500);
@@ -664,6 +655,7 @@ const McpForm = ({
                   type="button"
                   variant="ghost"
                   size="icon"
+                  aria-label="Remove header"
                   className="shrink-0 cursor-pointer"
                   onClick={() => {
                     const newRows = formData.headerRows.filter(
@@ -713,7 +705,7 @@ const McpForm = ({
               ) : (
                 <Alert>
                   <ShieldOff />
-                  <AlertTitle>Not Authorized</AlertTitle>
+                  <AlertTitle>Not authorized</AlertTitle>
                   <AlertDescription>
                     This MCP server requires OAuth authorization before it can
                     be used.

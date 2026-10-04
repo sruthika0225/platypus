@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { ProtectedRoute } from "./protected-route";
 
 const { auth, push } = vi.hoisted(() => ({
@@ -8,6 +8,8 @@ const { auth, push } = vi.hoisted(() => ({
     isAuthLoading: false,
     orgMembership: { role: "member" } as { role: string } | null,
     actor: "org-member",
+    accessReadError: null as unknown,
+    retryAccessReads: vi.fn(),
   },
   push: vi.fn(),
 }));
@@ -34,7 +36,9 @@ beforeEach(() => {
     isAuthLoading: false,
     orgMembership: { role: "member" },
     actor: "org-member",
+    accessReadError: null,
   });
+  auth.retryAccessReads.mockReset();
 });
 
 describe("ProtectedRoute", () => {
@@ -44,6 +48,19 @@ describe("ProtectedRoute", () => {
 
     expect(push).toHaveBeenCalledWith("/sign-in");
     expect(container).toBeEmptyDOMElement();
+  });
+
+  // A session read that never landed says nothing about the session (#1204).
+  it("offers a retry, not sign-in, when the session read fails", () => {
+    Object.assign(auth, { user: null, accessReadError: { status: 500 } });
+    renderGate({});
+
+    expect(push).not.toHaveBeenCalled();
+    expect(screen.getByText("Couldn't load")).toBeInTheDocument();
+    expect(screen.queryByText("Secret page")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(auth.retryAccessReads).toHaveBeenCalled();
   });
 
   it.each([
@@ -121,5 +138,47 @@ describe("ProtectedRoute", () => {
 
     expect(screen.getByText("Secret page")).toBeInTheDocument();
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProtectedRoute when an access read fails", () => {
+  it.each([
+    {
+      name: "the membership",
+      state: { actor: "org-member", orgMembership: null },
+      props: { requireOrgAccess: true },
+      denial: "Organization Access Required",
+    },
+    {
+      name: "the Workspace",
+      state: { actor: "org-member", orgMembership: { role: "member" } },
+      props: { requireOrgAccess: true, requireWorkspaceAccess: true },
+      denial: "Workspace Access Required",
+    },
+  ])(
+    "offers a retry when $name read fails, not an access denial",
+    ({ state, props, denial }) => {
+      Object.assign(auth, state, { accessReadError: { status: 500 } });
+      renderGate(props);
+
+      expect(screen.getByText("Couldn't load")).toBeInTheDocument();
+      expect(screen.queryByText(denial)).toBeNull();
+      expect(screen.queryByText("Secret page")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(auth.retryAccessReads).toHaveBeenCalled();
+    },
+  );
+
+  // A failed read only matters where it would have turned the caller away.
+  it("lets in a caller the gate admits anyway", () => {
+    Object.assign(auth, {
+      actor: "operator",
+      orgMembership: null,
+      accessReadError: { status: 500 },
+    });
+    renderGate({ requireOrgAccess: true });
+
+    expect(screen.getByText("Secret page")).toBeInTheDocument();
   });
 });

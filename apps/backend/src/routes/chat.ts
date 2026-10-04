@@ -26,23 +26,13 @@ import type { Variables } from "../server.ts";
 import { rewriteStorageUrls, deleteStoredPrefix } from "../storage/utils.ts";
 import { chatStorageKeyPrefix } from "../storage/keys.ts";
 import { getOrigin } from "../utils/get-origin.ts";
-import { agentRunner } from "../runs/agent-runner.ts";
-import { runRegistry } from "../runs/run-registry.ts";
-import { ChatSink } from "../runs/sinks/chat-sink.ts";
+import { cancelRun } from "../runs/run-cancel.ts";
+import { CHAT_BUSY_MESSAGE } from "../runs/sinks/chat-sink.ts";
+import { startChatTurn } from "../services/chat-turn.ts";
 import { normalizeWebToolParts } from "../runs/web-tool-normalize.ts";
-import type { RunInput } from "../runs/types.ts";
-import { actorUserId } from "../scope.ts";
-import {
-  formatSummariesForSystemPrompt,
-  resolveMemoryPin,
-  retrieveRecentSummaries,
-} from "../services/memory-retrieval.ts";
-import { chatTimeouts } from "../runs/chat-timeouts.ts";
-import { seedUserInvokedSkill } from "../services/slash-command.ts";
 import {
   deleteMessage,
   loadActivePath,
-  resolveTurn,
   switchActivePath,
 } from "../services/chat-messages.ts";
 import type { PlatypusUIMessage } from "../types.ts";
@@ -74,12 +64,12 @@ const chatResponse = ({
 
 /**
  * A run moves the leaf onto its own reply as it goes, and a delete or a switch
- * landing mid-run would race it (ADR-0026). A Chat turn runs under its Chat's
- * id.
+ * landing mid-run would race it (ADR-0026). Read from the row the run claimed,
+ * since the run may be another instance's (#1237).
  */
-const refuseWhileRunning = (chatId: string) => {
-  if (runRegistry.has(chatId)) {
-    throw new ConflictError("A reply is still being written in this Chat");
+const refuseWhileRunning = (chat: { status: string }) => {
+  if (chat.status === "running") {
+    throw new ConflictError(CHAT_BUSY_MESSAGE);
   }
 };
 
@@ -104,17 +94,22 @@ chat.get(
     const { workspaceId } = workspaceScopeOf(c);
     const { limit: limitStr, offset: offsetStr, search } = c.req.valid("query");
 
-    const limit = Math.min(parseInt(limitStr ?? "100") || 100, 100);
-    const offset = parseInt(offsetStr ?? "0") || 0;
+    const limit = Math.min(
+      Math.max(parseInt(limitStr ?? "100") || 100, 1),
+      100,
+    );
+    const offset = Math.max(parseInt(offsetStr ?? "0") || 0, 0);
 
-    // Build search filter using ILIKE on title and tags
-    const searchFilter =
-      search && search.trim() !== ""
-        ? or(
-            sql`${chatTable.title} ILIKE ${"%" + search.trim() + "%"}`,
-            sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${chatTable.tags}) AS t WHERE t ILIKE ${"%" + search.trim() + "%"})`,
-          )
-        : undefined;
+    // Build search filter using ILIKE on title and tags. `\` is Postgres's
+    // default LIKE escape, so escaping `%`, `_` and `\` matches them literally.
+    const term = search?.trim().replace(/[\\%_]/g, "\\$&");
+    const pattern = `%${term}%`;
+    const searchFilter = term
+      ? or(
+          sql`${chatTable.title} ILIKE ${pattern}`,
+          sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${chatTable.tags}) AS t WHERE t ILIKE ${pattern})`,
+        )
+      : undefined;
 
     const whereClause = and(
       eq(chatTable.workspaceId, workspaceId),
@@ -177,113 +172,12 @@ chat.post(
   requireWorkspaceOwner,
   sValidator("json", chatSubmitSchema),
   async (c) => {
-    const scope = workspaceScopeOf(c);
-    const data = c.req.valid("json");
-
-    // ADR-0020: resolve the pinned Memories block OUTSIDE composition. The
-    // Chat route owns the chat row, so it does the arithmetic — compare the gap
-    // since the previous turn against the re-pin horizon and re-take or reuse —
-    // and the resolved block rides down through `RunInput` into
-    // `prepareChatTurn`'s input. The renderer never learns about clocks.
-    //
-    // Idleness is measured against `lastTurnAt` — stamped only by the run sink
-    // at turn boundaries — never `updatedAt`, which the memory-extraction job
-    // and auto-titling bump at their own cadence and so cannot stand in for a
-    // recent turn.
-    const existingChat = await db
-      .select({
-        memorySnapshot: chatTable.memorySnapshot,
-        lastTurnAt: chatTable.lastTurnAt,
-      })
-      .from(chatTable)
-      .where(
-        ownedWhere("chat", { id: data.id, workspaceId: scope.workspaceId }),
-      )
-      .limit(1);
-
-    // What the turn continues, from the server's own rows (ADR-0026). Refuses a
-    // turn that cannot run — an unknown parent, a duplicate id, a reply that
-    // cannot regenerate — before anything is retrieved or written.
-    const turn = await resolveTurn({
-      chatId: data.id,
-      owned: existingChat.length > 0,
-      request: data,
-    });
-
-    const now = new Date();
-    const pin = resolveMemoryPin({
-      existingSnapshot: existingChat[0]?.memorySnapshot,
-      previousTurnAt: existingChat[0]?.lastTurnAt,
-      now,
-    });
-
-    // Reuse carries its own block, so there is no snapshot to assert about: the
-    // Chat has not idled past the horizon and the prefix stays byte-identical
-    // across its turns. Otherwise re-take — a fresh Chat, a row written before
-    // this feature, or a Chat that has idled past the horizon (by which point
-    // the cached prefix is provably expired, so the re-take is free). The
-    // retrieval window is anchored to `now`, not a render-time clock read.
-    const memorySnapshot = pin.reuse
-      ? pin.block
-      : formatSummariesForSystemPrompt(
-          await retrieveRecentSummaries(
-            actorUserId(scope.principal),
-            scope.workspaceId,
-            now,
-          ),
-        );
-
-    // A user-invoked Skill (issue #649). The token stays in the text the user
-    // sent; what is appended here is a trailing assistant message carrying the
-    // `loadSkill` call and its result, so the body reaches the model as tool
-    // content with correct provenance and never as words the user said.
-    //
-    // Seeded onto the messages that go into `RunInput` — the array that reaches
-    // `originalMessages`, whose trailing assistant message the reply continues
-    // and the sink persists. Seeding into the converted model messages instead
-    // would reach the model and persist nothing, quietly turning "persist the
-    // pair" into "re-seed every turn". A regenerate ends at the same user
-    // message, so it is seeded again exactly as its submit was.
-    const messages = await seedUserInvokedSkill({
-      messages: turn.messages,
-      orgId: scope.orgId,
-      workspaceId: scope.workspaceId,
-      agentId: data.agentId,
-    });
-
-    const input: RunInput = {
-      runId: data.id,
-      request: data,
-      messages,
-      memorySnapshot,
-      // The same moment the pin was resolved against, so a re-take and its
-      // retrieval window agree on "now" rather than reading the clock twice.
-      memoriesReferenceDate: now,
-    };
-
-    const sink = new ChatSink({
-      orgId: scope.orgId,
-      workspaceId: scope.workspaceId,
-      message: turn.message,
-      parentId: turn.parentId,
-    });
-
-    // A rejected attachment (issue #328), an unresolved Agent/Provider/model,
-    // or a missing Workspace throws before the sink persists anything, so the
-    // chat is never bricked — the central `onError` (ADR-0010) maps the typed
-    // error to its HTTP status.
-    return await agentRunner.stream({
-      scope,
-      input,
-      sink,
-      options: {
-        // c.req.raw.signal is intentionally NOT passed: chat runs
-        // continue server-side regardless of the client connection.
-        // The client cancels via POST /chat/:chatId/cancel.
-        origin: getOrigin(c),
-        frontendUrl: process.env.FRONTEND_URL,
-        timeouts: chatTimeouts(),
-      },
+    // An interactive turn always includes the Owner's Memories.
+    return await startChatTurn({
+      scope: workspaceScopeOf(c),
+      request: c.req.valid("json"),
+      includeMemories: true,
+      origin: getOrigin(c),
     });
   },
 );
@@ -304,9 +198,10 @@ chat.post(
     // only thing the registry sees.
     await requireOwned(db, "chat", { id: chatId, workspaceId });
 
-    // Idempotent: cancel returns false for unknown / already-finished
-    // runs, but we still respond 200 so flaky clients can safely retry.
-    agentRunner.cancel(chatId);
+    // Idempotent: an unknown or already-finished run is a no-op, but we still
+    // respond 200 so flaky clients can safely retry. The run may be another
+    // instance's, so this reaches whichever holds it (#1237).
+    await cancelRun(chatId);
     return c.json({ message: "Cancellation requested" }, 200);
   },
 );
@@ -333,7 +228,7 @@ chat.delete(
       chatStorageKeyPrefix({ orgId, workspaceId, chatId }),
     );
 
-    return c.json({ message: "Chat deleted successfully" }, 200);
+    return c.json({ message: "Chat deleted" });
   },
 );
 
@@ -347,8 +242,9 @@ chat.delete(
     const { chatId, messageId } = c.req.param();
     const { workspaceId } = workspaceScopeOf(c);
 
-    await requireOwned(db, "chat", { id: chatId, workspaceId });
-    refuseWhileRunning(chatId);
+    refuseWhileRunning(
+      await requireOwned(db, "chat", { id: chatId, workspaceId }),
+    );
 
     await deleteMessage(chatId, messageId);
 
@@ -368,8 +264,9 @@ chat.put(
     const { workspaceId } = workspaceScopeOf(c);
     const { messageId } = c.req.valid("json");
 
-    await requireOwned(db, "chat", { id: chatId, workspaceId });
-    refuseWhileRunning(chatId);
+    refuseWhileRunning(
+      await requireOwned(db, "chat", { id: chatId, workspaceId }),
+    );
 
     const { messages, tree } = await switchActivePath(chatId, messageId);
 

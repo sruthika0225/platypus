@@ -8,6 +8,7 @@ import {
   primaryKey,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // Import and re-export auth schema
 export * from "./auth-schema.ts";
@@ -40,6 +41,10 @@ export const organization = pgTable("organization", (t) => ({
   // Free-text org identity / context, rendered early in the system prompt as
   // framing (not a security control). Nullable — existing orgs are unchanged.
   identityContext: t.text("identity_context"),
+  // Which Workspaces may take Inbound Trigger calls (ADR-0030): "off" |
+  // "all" | "selected". Checked on every call, so changing it takes effect
+  // on the next one. Settable only by an Org Admin.
+  inboundTriggerGate: t.text("inbound_trigger_gate").notNull().default("off"),
   createdAt: t.timestamp("created_at").notNull().defaultNow(),
   updatedAt: t.timestamp("updated_at").notNull().defaultNow(),
 }));
@@ -149,6 +154,13 @@ export const workspace = pgTable(
       .boolean("mcp_self_management")
       .notNull()
       .default(false),
+    // Whether this Workspace's Inbound Triggers are reachable while the
+    // Organization's gate is "selected" (ADR-0030). Org Admin-only, like the
+    // delegation flags above; ignored under "off" and "all".
+    inboundTriggersAllowed: t
+      .boolean("inbound_triggers_allowed")
+      .notNull()
+      .default(false),
 
     createdAt: t.timestamp("created_at").notNull().defaultNow(),
     updatedAt: t.timestamp("updated_at").notNull().defaultNow(),
@@ -156,6 +168,13 @@ export const workspace = pgTable(
   (t) => [
     index("idx_workspace_organization_id").on(t.organizationId),
     index("idx_workspace_owner_id").on(t.ownerId),
+    index("idx_workspace_task_model_provider_id").on(t.taskModelProviderId),
+    index("idx_workspace_memory_extraction_provider_id").on(
+      t.memoryExtractionProviderId,
+    ),
+    index("idx_workspace_memory_embedding_provider_id").on(
+      t.memoryEmbeddingProviderId,
+    ),
   ],
 );
 
@@ -274,6 +293,9 @@ export const chatMessage = pgTable(
   }),
   (t) => [
     primaryKey({ columns: [t.chatId, t.id] }),
+    // The parent check on a message delete; the primary key leads with
+    // `chat_id` alone, which matches every message of the Chat.
+    index("idx_chat_message_chat_id_parent_id").on(t.chatId, t.parentId),
     foreignKey({
       columns: [t.chatId, t.parentId],
       foreignColumns: [t.chatId, t.id],
@@ -378,6 +400,10 @@ export const mcp = pgTable(
     lastKnownToolListingFetchedAt: t.timestamp(
       "last_known_tool_listing_fetched_at",
     ),
+    // When a turn's fetch, or a stale tool's lazy connect, last failed (issue
+    // #1105). Within a minute of it a turn serves the listing above without
+    // trying the fetch (ADR-0031); null once the server answers again.
+    lastFetchFailedAt: t.timestamp("last_fetch_failed_at"),
     createdAt: t.timestamp("created_at").notNull().defaultNow(),
     updatedAt: t.timestamp("updated_at").notNull().defaultNow(),
   }),
@@ -481,6 +507,13 @@ export const blueprint = pgTable(
   }),
   (t) => [
     index("idx_blueprint_organization_id").on(t.organizationId),
+    index("idx_blueprint_task_model_provider_id").on(t.taskModelProviderId),
+    index("idx_blueprint_memory_extraction_provider_id").on(
+      t.memoryExtractionProviderId,
+    ),
+    index("idx_blueprint_memory_embedding_provider_id").on(
+      t.memoryEmbeddingProviderId,
+    ),
     unique("unique_blueprint_name_org").on(t.organizationId, t.name),
   ],
 );
@@ -597,6 +630,7 @@ export const organizationMember = pgTable(
   (t) => [
     index("idx_org_member_org_id").on(t.organizationId),
     index("idx_org_member_user_id").on(t.userId),
+    unique("unique_org_member_org_user").on(t.organizationId, t.userId),
   ],
 );
 
@@ -610,10 +644,11 @@ export const invitation = pgTable(
       .text("organization_id")
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
+    // Null once the inviter's account is deleted: the invitation stays
+    // redeemable, it just no longer names who sent it.
     invitedBy: t
       .text("invited_by")
-      .notNull()
-      .references(() => user.id),
+      .references(() => user.id, { onDelete: "set null" }),
     status: t.text("status").notNull().default("pending"), // pending | accepted | declined | expired
     // Optional name for the Workspace provisioned on accept (ADR-0008). Null
     // defaults to "<member name>'s Workspace" at accept time.
@@ -634,7 +669,12 @@ export const invitation = pgTable(
   (t) => [
     index("idx_invitation_email").on(t.email),
     index("idx_invitation_org_id").on(t.organizationId),
-    unique("unique_invitation_org_email").on(t.organizationId, t.email),
+    index("idx_invitation_invited_by").on(t.invitedBy),
+    // Partial: only a pending invitation claims the address (#1131), so an
+    // accepted, declined or expired one never blocks re-inviting it.
+    uniqueIndex("unique_invitation_org_email")
+      .on(t.organizationId, t.email)
+      .where(sql`${t.status} = 'pending'`),
     unique("unique_invitation_token").on(t.token),
   ],
 );
@@ -722,7 +762,11 @@ export const context = pgTable(
   (t) => [
     index("idx_context_user_id").on(t.userId),
     index("idx_context_workspace_id").on(t.workspaceId),
-    unique("unique_context_user_workspace").on(t.userId, t.workspaceId),
+    // A global Context has a null workspace_id; nulls must collide so a
+    // user holds at most one global Context.
+    unique("unique_context_user_workspace")
+      .on(t.userId, t.workspaceId)
+      .nullsNotDistinct(),
   ],
 );
 
@@ -752,6 +796,7 @@ export const memoryDailySummary = pgTable(
     ),
     index("idx_daily_summary_user_workspace").on(t.userId, t.workspaceId),
     index("idx_daily_summary_date").on(t.summaryDate),
+    index("idx_daily_summary_workspace_id").on(t.workspaceId),
     // No HNSW index — dimensions vary per workspace. Exact nearest-neighbor
     // search via <=> is fast enough for the scale of daily summaries (hundreds
     // to low thousands of rows per workspace). Queries are already scoped by
@@ -771,7 +816,7 @@ export const trigger = pgTable(
       .text("agent_id")
       .notNull()
       .references(() => agent.id, { onDelete: "restrict" }),
-    type: t.text("type").notNull(), // "cron" | "event"
+    type: t.text("type").notNull(), // "cron" | "event" | "inbound"
     name: t.text("name").notNull(),
     description: t.text("description"),
     instruction: t.text("instruction").notNull(),
@@ -786,6 +831,22 @@ export const trigger = pgTable(
     config: t.jsonb("config").notNull(),
     lastRunAt: t.timestamp("last_run_at"),
     nextRunAt: t.timestamp("next_run_at"),
+    // Inbound Triggers only (ADR-0030). The token is shown once and stored as
+    // a SHA-256 hash — it is 256 random bits, so a slow hash buys nothing. Null
+    // on other types, and on an Inbound Trigger whose token was revoked.
+    tokenHash: t.text("token_hash"),
+    tokenCreatedAt: t.timestamp("token_created_at"),
+    tokenExpiresAt: t.timestamp("token_expires_at"),
+    // The latest expiry Notification sent for the current token: null |
+    // "expiring_30" | "expiring_7" | "expired". The three are sent in that
+    // order, so one ordered value records all of them. Kept here rather than
+    // inferred from the Notification, which the Owner may delete; issuing or
+    // revoking a token clears it.
+    tokenNotice: t.text("token_notice"),
+    // Written at most once a minute per Trigger, so a flood of calls cannot
+    // become a flood of writes.
+    lastUsedAt: t.timestamp("last_used_at"),
+    lastRejectedAt: t.timestamp("last_rejected_at"),
     createdAt: t.timestamp("created_at").notNull().defaultNow(),
     updatedAt: t.timestamp("updated_at").notNull().defaultNow(),
   }),
@@ -793,6 +854,7 @@ export const trigger = pgTable(
     index("idx_trigger_workspace_id").on(t.workspaceId),
     index("idx_trigger_next_run_at").on(t.nextRunAt),
     index("idx_trigger_type").on(t.type),
+    index("idx_trigger_agent_id").on(t.agentId),
   ],
 );
 
@@ -812,7 +874,9 @@ export const triggerRun = pgTable(
     // run was for. Null on Cron runs, on rows written before the column
     // existed, and on events that name no single entity (bulk
     // `notification.read`); the run-rate breaker counts by this column and
-    // ignores null, so those firings are exempt by construction.
+    // ignores null, so those firings are exempt by construction. An Inbound
+    // Trigger run always carries one: its record key's value, or the Trigger's
+    // own id when no key is marked, so every inbound run is under the breaker.
     entityId: t.text("entity_id"),
     startedAt: t.timestamp("started_at").notNull().defaultNow(),
     completedAt: t.timestamp("completed_at"),
@@ -929,6 +993,10 @@ export const kanbanCard = pgTable(
     index("idx_kanban_card_due_date").on(t.dueDate),
     index("idx_kanban_card_priority").on(t.priority),
     index("idx_kanban_card_column_position").on(t.columnId, t.position),
+    index("idx_kanban_card_created_by_user_id").on(t.createdByUserId),
+    index("idx_kanban_card_created_by_agent_id").on(t.createdByAgentId),
+    index("idx_kanban_card_last_edited_by_user_id").on(t.lastEditedByUserId),
+    index("idx_kanban_card_last_edited_by_agent_id").on(t.lastEditedByAgentId),
   ],
 );
 
@@ -986,6 +1054,8 @@ export const triggerRunEvent = pgTable(
   (t) => [
     // The detail read: one run's events, incrementally past a sequence number.
     index("idx_trigger_run_event_run_id_seq").on(t.runId, t.seq),
+    // Retention's cascade looks up each deleted event's children.
+    index("idx_trigger_run_event_parent_event_id").on(t.parentEventId),
   ],
 );
 
@@ -1076,7 +1146,11 @@ export const kanbanCardComment = pgTable(
     createdAt: t.timestamp("created_at").notNull().defaultNow(),
     updatedAt: t.timestamp("updated_at").notNull().defaultNow(),
   }),
-  (t) => [index("idx_kanban_card_comment_card_id").on(t.cardId)],
+  (t) => [
+    index("idx_kanban_card_comment_card_id").on(t.cardId),
+    index("idx_kanban_card_comment_created_by_user_id").on(t.createdByUserId),
+    index("idx_kanban_card_comment_created_by_agent_id").on(t.createdByAgentId),
+  ],
 );
 
 /**
@@ -1118,6 +1192,8 @@ export const kanbanCardHistory = pgTable(
       t.cardId,
       t.createdAt,
     ),
+    index("idx_kanban_card_history_actor_user_id").on(t.actorUserId),
+    index("idx_kanban_card_history_actor_agent_id").on(t.actorAgentId),
   ],
 );
 

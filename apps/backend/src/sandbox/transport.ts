@@ -195,8 +195,16 @@ export interface SandboxTransport {
    * own verdict is how the two adapters used to disagree about a file sitting
    * exactly on the cap, and reading the size first (SFTP can, `cat` cannot) is
    * not worth reopening that.
+   *
+   * `signal` is the turn's: core already stops waiting when it fires, so it is
+   * for a transport that can end the read itself rather than leave it running.
    */
-  readFile(ctx: SandboxContext, absPath: string, cap: number): Promise<Buffer>;
+  readFile(
+    ctx: SandboxContext,
+    absPath: string,
+    cap: number,
+    signal?: AbortSignal,
+  ): Promise<Buffer>;
 
   /**
    * Write bytes to an absolute path, creating any missing parent directories.
@@ -217,4 +225,11 @@ export interface SandboxTransport {
    * nothing else.
    */
   destroy(ctx: SandboxContext): Promise<void>;
+
+  /**
+   * Drop whatever this transport holds open between calls — the backend's
+   * `close()`, which core calls when the Chat turn ends. Optional: a transport
+   * that holds nothing open leaves it out.
+   */
+  close?(): Promise<void>;
 }

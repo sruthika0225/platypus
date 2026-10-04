@@ -15,7 +15,10 @@ import {
   savedBody,
 } from "@/lib/form-test-harness";
 import { selectOption } from "@/lib/test-utils";
-import { OAUTH_MCP_SUCCESS_EVENT } from "@/lib/constants";
+import {
+  OAUTH_MCP_ERROR_EVENT,
+  OAUTH_MCP_SUCCESS_EVENT,
+} from "@/lib/constants";
 
 // --- Module mocks ------------------------------------------------------------
 
@@ -363,38 +366,50 @@ describe("McpForm OAuth", () => {
     ]);
   });
 
-  it("clears OAuth polling interval when unmounted", async () => {
+  // The form polls the popup until it closes. That poll belongs to the form:
+  // it must not outlive it, and a retry must replace it rather than stack.
+  it("keeps one popup poll at a time and stops it on unmount", async () => {
     stubSaveSequence(
       { status: 200, body: { id: "m1" } },
-      {
-        status: 200,
-        body: {
-          authorizationUrl: "http://mcp.test/oauth",
-        },
-      },
+      { status: 200, body: { authorizationUrl: "https://idp.test/auth" } },
+      { status: 200, body: { id: "m1" } },
+      { status: 200, body: { authorizationUrl: "https://idp.test/auth" } },
     );
-
-    const popup = {
-      closed: false,
-    };
-
-    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
-
+    const openMock = vi.fn(() => ({ closed: false }));
+    vi.stubGlobal("open", openMock);
     const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
     const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
-
+    const polls = () =>
+      setIntervalSpy.mock.results
+        .filter((_, i) => setIntervalSpy.mock.calls[i][1] === 500)
+        .map((r) => r.value);
+    const live = () =>
+      polls().filter(
+        (id) => !clearIntervalSpy.mock.calls.some(([c]) => c === id),
+      );
     const { unmount } = renderOAuthMcp(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "Authorize" }));
+    const authorize = async (opens: number) => {
+      fireEvent.click(await screen.findByRole("button", { name: "Authorize" }));
+      await waitFor(() => expect(openMock).toHaveBeenCalledTimes(opens));
+    };
 
-    await waitFor(() => expect(setIntervalSpy).toHaveBeenCalled());
+    await authorize(1);
+    expect(live()).toHaveLength(1);
 
-    const intervalId =
-      setIntervalSpy.mock.results[setIntervalSpy.mock.results.length - 1]
-        ?.value;
+    // The provider reports failure while the popup stays open; the reader
+    // tries again.
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: window.location.origin,
+        data: { type: OAUTH_MCP_ERROR_EVENT, message: "denied" },
+      }),
+    );
+    await authorize(2);
+    expect(polls()).toHaveLength(2);
+    expect(live()).toHaveLength(1);
 
     unmount();
-
-    expect(clearIntervalSpy).toHaveBeenCalledWith(intervalId);
+    expect(live()).toHaveLength(0);
   });
 });

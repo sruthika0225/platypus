@@ -23,7 +23,11 @@ import { FormFooterButtons } from "@/components/form-footer-buttons";
 import { DetailFormState } from "@/components/detail-form-state";
 import { useEntityDelete, useEntityForm } from "@/hooks/use-entity-form";
 import { useRouter } from "next/navigation";
-import { type Workspace, type Provider } from "@platypus/schemas";
+import {
+  type Organization,
+  type Workspace,
+  type Provider,
+} from "@platypus/schemas";
 import {
   CONTEXT_MAX_LENGTH,
   DEFAULT_WORKSPACE_MAX_DAILY_SUMMARIES,
@@ -35,6 +39,8 @@ import { canManageWorkspaceDelegation } from "@/lib/authorization";
 import { useAuth } from "@/components/auth-provider";
 import { toast } from "sonner";
 import { useScopedSWR } from "@/hooks/use-scoped-swr";
+import { organizationEntity } from "@/lib/api-write";
+import Link from "next/link";
 import {
   FieldSkeleton,
   FooterSkeleton,
@@ -50,7 +56,8 @@ interface WorkspaceFormProps {
   workspaceId: string;
 }
 
-// providerSelfManagement and mcpSelfManagement are deliberately excluded:
+// providerSelfManagement, mcpSelfManagement and inboundTriggersAllowed are
+// deliberately excluded:
 // this form has no field that retracts an error keyed to them.
 const RETRACTABLE_FIELDS = [
   "name",
@@ -70,6 +77,7 @@ type WorkspaceFormData = {
   maxDailySummaries: number;
   providerSelfManagement: boolean;
   mcpSelfManagement: boolean;
+  inboundTriggersAllowed: boolean;
 };
 
 /** A delegation flag: label and description, its Switch on the right. */
@@ -97,6 +105,7 @@ const WorkspaceFormSkeleton = ({ delegation }: { delegation: boolean }) => (
           <>
             <DelegationRowSkeleton />
             <DelegationRowSkeleton />
+            <DelegationRowSkeleton />
           </>
         )}
       </FormSkeletonGroup>
@@ -115,6 +124,14 @@ const WorkspaceForm = ({ orgId, workspaceId }: WorkspaceFormProps) => {
     results: Provider[];
   }>("providers", { orgId, workspaceId });
   const providers = providersData?.results || [];
+
+  // The Workspace's Inbound Trigger switch only counts under the
+  // Organization's "Selected workspaces" gate (ADR-0030).
+  const { data: organization } = useScopedSWR<Organization>(
+    organizationEntity(orgId),
+    canManageDelegation ? {} : null,
+  );
+  const inboundGate = organization?.inboundTriggerGate;
 
   const {
     loadState,
@@ -137,6 +154,7 @@ const WorkspaceForm = ({ orgId, workspaceId }: WorkspaceFormProps) => {
       maxDailySummaries: DEFAULT_WORKSPACE_MAX_DAILY_SUMMARIES,
       providerSelfManagement: false,
       mcpSelfManagement: false,
+      inboundTriggersAllowed: false,
     },
     entity: "workspaces",
     scope: { orgId },
@@ -151,6 +169,7 @@ const WorkspaceForm = ({ orgId, workspaceId }: WorkspaceFormProps) => {
         workspace.maxDailySummaries ?? DEFAULT_WORKSPACE_MAX_DAILY_SUMMARIES,
       providerSelfManagement: workspace.providerSelfManagement ?? false,
       mcpSelfManagement: workspace.mcpSelfManagement ?? false,
+      inboundTriggersAllowed: workspace.inboundTriggersAllowed ?? false,
     }),
     retractableFields: RETRACTABLE_FIELDS,
     buildPayload: (data) => ({
@@ -163,6 +182,9 @@ const WorkspaceForm = ({ orgId, workspaceId }: WorkspaceFormProps) => {
       // Admin-only; the backend strips these for non-admins (ADR-0006).
       providerSelfManagement: data.providerSelfManagement,
       mcpSelfManagement: data.mcpSelfManagement,
+      // Admin-only too; read only while the Organization's Inbound Triggers
+      // setting is "Selected workspaces" (ADR-0030).
+      inboundTriggersAllowed: data.inboundTriggersAllowed,
     }),
     onSuccess: () => {
       toast.success("Workspace updated");
@@ -441,6 +463,50 @@ const WorkspaceForm = ({ orgId, workspaceId }: WorkspaceFormProps) => {
                       setFormData((prev) => ({
                         ...prev,
                         mcpSelfManagement: checked,
+                      }))
+                    }
+                  />
+                </Field>
+
+                <Field
+                  orientation="horizontal"
+                  className="items-center justify-between"
+                >
+                  <div>
+                    <FieldLabel htmlFor="inboundTriggersAllowed">
+                      Allow Inbound Triggers
+                    </FieldLabel>
+                    <FieldDescription>
+                      {inboundGate === "off" || inboundGate === "all" ? (
+                        <>
+                          {inboundGate === "all"
+                            ? "Your organization allows Inbound Triggers in every workspace."
+                            : "Your organization doesn't allow Inbound Triggers."}{" "}
+                          Change this in the organization&apos;s{" "}
+                          <Link
+                            href={orgRoutes(orgId).settings.inboundTriggers}
+                            className="underline"
+                          >
+                            Inbound Triggers
+                          </Link>{" "}
+                          settings.
+                        </>
+                      ) : (
+                        <>
+                          Let this workspace&apos;s Inbound Triggers accept
+                          calls from outside Platypus. Off by default.
+                        </>
+                      )}
+                    </FieldDescription>
+                  </div>
+                  <Switch
+                    id="inboundTriggersAllowed"
+                    checked={formData.inboundTriggersAllowed}
+                    disabled={isSubmitting || inboundGate !== "selected"}
+                    onCheckedChange={(checked) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        inboundTriggersAllowed: checked,
                       }))
                     }
                   />

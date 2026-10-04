@@ -79,6 +79,28 @@ describe("Trigger Routes", () => {
       expect(body.results).toHaveLength(2);
     });
 
+    it("never returns an Inbound Trigger's token hash", async () => {
+      stubAuthLookups();
+      mockDb.orderBy.mockResolvedValueOnce([
+        {
+          ...cronTrigger,
+          type: "inbound",
+          config: { inputs: [], tokenExpiryDays: 90 },
+          tokenHash: "secret-hash",
+          tokenNotice: "expiring_30",
+        },
+      ]);
+
+      const res = await app.request(baseUrl);
+      const text = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(text).not.toContain("secret-hash");
+      expect(text).not.toContain("tokenNotice");
+      const body = JSON.parse(text) as { results: { hasToken: boolean }[] };
+      expect(body.results[0].hasToken).toBe(true);
+    });
+
     it("requires authentication", async () => {
       mockNoSession();
       const res = await app.request(baseUrl);
@@ -240,6 +262,29 @@ describe("Trigger Routes", () => {
       expect(res.status).toBe(201);
     });
 
+    it.each([
+      [
+        "a cron config for an Inbound Trigger",
+        { type: "inbound", config: { cronExpression: "* * * * *" } },
+      ],
+      ["an unknown event", { type: "event", config: { events: ["bogus"] } }],
+      ["an inbound config for a Cron Trigger", { type: "cron", config: {} }],
+    ])(
+      "validates the config against its own type, refusing %s",
+      async (_label, override) => {
+        stubAuthLookups();
+
+        const res = await app.request(baseUrl, {
+          method: "POST",
+          body: JSON.stringify({ ...createBody, ...override }),
+          headers: { "Content-Type": "application/json" },
+        });
+
+        expect(res.status).toBe(400);
+        expect(mockDb.values).not.toHaveBeenCalled();
+      },
+    );
+
     it("rejects creation when the agent is not in the workspace", async () => {
       stubAuthLookups();
       mockDb.limit.mockResolvedValueOnce([]); // agent verify: not found
@@ -374,6 +419,33 @@ describe("Trigger Routes", () => {
       expect(setArg.nextRunAt).toBeNull();
     });
 
+    it("leaves the settings a toggle does not mention unchanged", async () => {
+      stubAuthLookups();
+      mockDb.limit.mockResolvedValueOnce([
+        {
+          ...cronTrigger,
+          maxRunsToKeep: 10,
+          search: true,
+          includeMemories: true,
+        },
+      ]); // existing
+      mockDb.returning.mockResolvedValueOnce([
+        { ...cronTrigger, enabled: false },
+      ]);
+
+      const res = await app.request(`${baseUrl}/trig-1`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: false }),
+        headers: { "Content-Type": "application/json" },
+      });
+      expect(res.status).toBe(200);
+      const setArg = mockDb.set.mock.calls[0][0] as Record<string, unknown>;
+      expect(setArg.enabled).toBe(false);
+      expect(setArg).not.toHaveProperty("maxRunsToKeep");
+      expect(setArg).not.toHaveProperty("search");
+      expect(setArg).not.toHaveProperty("includeMemories");
+    });
+
     it("round-trips includeMemories through an update", async () => {
       stubAuthLookups();
       mockDb.limit.mockResolvedValueOnce([cronTrigger]); // existing
@@ -405,6 +477,19 @@ describe("Trigger Routes", () => {
       const res = await app.request(`${baseUrl}/trig-1`, { method: "DELETE" });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ message: "Trigger deleted" });
+    });
+
+    it("deletes an Inbound Trigger: the Owner's surface may", async () => {
+      stubAuthLookups();
+      // Were the route to take the Agent's narrower surface, the type check
+      // would read this row and refuse with 400.
+      mockDb.limit.mockResolvedValueOnce([{ ...cronTrigger, type: "inbound" }]);
+      mockDb.returning.mockResolvedValueOnce([
+        { ...cronTrigger, type: "inbound" },
+      ]);
+
+      const res = await app.request(`${baseUrl}/trig-1`, { method: "DELETE" });
+      expect(res.status).toBe(200);
     });
 
     it("returns 404 when the trigger doesn't exist", async () => {

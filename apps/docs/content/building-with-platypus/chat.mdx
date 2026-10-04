@@ -16,9 +16,9 @@ Most of the screen explains itself. This page covers the parts that don't.
 ## Choosing what answers you
 
 Click the model selector in the prompt input. Under **Agents** are the Agents in
-your Workspace; under each **Provider** are its enabled models. Picking an Agent
-replaces picking a Provider and model — the Agent already carries both, plus its
-Instructions, tools and Skills.
+your Workspace; under each Provider's name are its enabled models. Picking an
+Agent replaces picking a Provider and model — the Agent already carries both,
+plus its Instructions, tools and Skills.
 
 A model may be listed under a [Model
 alias](/concepts/providers#model-aliases) — a stable name like `fast` — rather
@@ -26,8 +26,10 @@ than its vendor model id. Pick it and your Chat follows whatever model the alias
 points at, including after an Org Admin repoints it.
 
 With an Agent selected, an info button — tooltip **Agent info** — opens
-**Agent Information**, which shows what that Agent is actually bringing to the
-conversation: its model, its Tool sets, its Skills and its Sub-Agents.
+**Agent Information**, which shows what that Agent is bringing to the
+conversation: its **Provider** and **Model**, **Instructions**, **Max Steps**,
+**Tools**, **Skills** and **Sub-Agents**, and under **Advanced settings** its
+sampling parameters.
 
 ## Invoking a Skill yourself
 
@@ -124,7 +126,7 @@ already landed isn't uploaded twice.
 
 The model is told each file's path and size, never its contents. The
 Agent reads the file with its Sandbox tools. In the conversation the upload
-shows as a **Sandbox** chip with the file's name, path and size. It has no
+shows as a chip marked **Sandbox**, with the file's path and size. It has no
 download link. To get a file back out, ask the Agent for it as a download.
 
 While a Sandbox chip is in the input, the model selector is locked, with the
@@ -190,7 +192,8 @@ a Provider uses is in [Providers & models](/concepts/providers#web-search).
 
 ## Voice input
 
-A microphone button next to it transcribes speech into the input box. The text
+A microphone button — tooltip **Microphone** — beside the attachments button
+transcribes speech into the input box. The text
 lands in the box rather than sending, so you can edit before pressing **Enter**.
 The same button is in the box you get when [rewriting a
 message](#rewriting-a-message), and it writes into that message rather than into
@@ -300,8 +303,8 @@ The ceiling itself is **Max output tokens** on the Provider's model, which an
 Org Admin sets — see
 [Capping a single reply](/self-hosting/providers-and-auth#capping-a-single-reply)
 if replies keep stopping short of what the model can write. Where one is set,
-hovering the model picker shows it ahead of time, so you don't have to hit the
-limit once to learn it exists.
+holding the pointer over the model picker shows **Max reply length** ahead of
+time, so you don't have to hit the limit once to learn it exists.
 
 <Callout type="warning">
   **Nothing resumes a cut-short reply.** **Regenerate** re-runs the whole turn
@@ -364,9 +367,9 @@ switch to a model with a bigger window. Nothing happens automatically.
   you.
 </Callout>
 
-**No meter at all** means one of two things, and both are normal: nobody has
-declared a **Context window** for this model, or the Provider does not report
-token usage. Either way the capacity or the reading is unknown, and Platypus
+**No meter at all** is normal, and means one of three things: the Chat has no
+reply yet, nobody has declared a **Context window** for this model, or the
+Provider does not report token usage. Either way the capacity or the reading is unknown, and Platypus
 would rather show nothing than a number you cannot interpret. An Org Admin
 declares the window on the Provider's model entry — see [Declaring a Context
 window](/self-hosting/providers-and-auth#declaring-a-context-window). Switching
@@ -375,19 +378,19 @@ model switches the meter with it, since the window belongs to the model.
 ## Freeing up space during a long tool-using turn
 
 Where a **Context window** is declared, a long turn that reads a lot of pages
-or files gets one piece of automatic help: once the meter above would be
-running high, older results from a small set of read-only tools stop being
-sent to the model. That set covers a handful of built-in reads — web search,
+or files gets one piece of automatic help: once the meter above reaches
+**70%**, older results from a small set of read-only tools stop being sent to
+the model, from earlier turns as well as this one. That set covers a handful of built-in reads — web search,
 reading a URL, reading a file or listing a directory in a Sandbox — plus any
 MCP tool whose server declares it read-only (see
 [MCP](/building-with-platypus/mcp)). An MCP server that declares nothing gets
-no benefit from this for that tool. Only the oldest results go, and only
-enough to make room; the most recent stay.
+no benefit from this for that tool. The four most recent results stay; every
+older one is no longer sent.
 
 Nothing is deleted. The full result is still in the message, still yours to
 read, and still there after a reload — this only changes what the model itself
 is sent starting from that point in the conversation. A tool result the model
-no longer has carries a small marker so you can tell; expand it to read what it
+no longer has carries a **Not sent to model** badge; expand it to read what it
 returned.
 
 <Callout type="warning">
@@ -413,9 +416,18 @@ Hover a message for its actions:
 | **‹ 2/3 ›**    | Any message that has Alternatives | Moves between its Alternatives — see below        |
 
 The actions are hidden on a reply that is still streaming, and **Regenerate**
-and the arrows on the rest of the Chat wait until it finishes. **Edit**,
+and the arrows on the rest of the Chat wait until it finishes. **Delete**
+stays clickable, but until then it is refused with **A reply is still being
+written in this Chat** — in another tab too. **Edit**,
 **Delete**, **Regenerate** and the arrows are absent entirely if you cannot send
 messages in this Chat — see [Sharing a Chat](#sharing-a-chat). **Copy** stays.
+
+<Callout type="info">
+  A table in a reply has no copy button when you reach your instance at a plain
+  `http://` address: the browser withholds the clipboard access it needs. Use
+  **Download table**, or select the table and copy it by hand. Every other copy
+  button works over HTTP.
+</Callout>
 
 ### Rewriting a message
 
@@ -484,6 +496,9 @@ the model is sent, and what your next message follows.
 
 The sidebar lists your Chats. **New chat** starts one.
 
+The sidebar shows your 100 most recent Chats, **Pinned** first. An older Chat
+drops off the list but isn't deleted — find it with search.
+
 The **Search chats...** box filters by title **and** tags, so tagging is a real
 filing system rather than decoration.
 
@@ -501,9 +516,10 @@ Each Chat's menu offers:
 - **Delete** — permanent, and it says so before doing it.
 
 <Callout type="info">
-  A new Chat is called **Untitled** until the first reply comes back, then the
-  backend names it from the conversation. You don't have to wait — rename it
-  whenever you like and the automatic titling leaves your name alone.
+  A new Chat is called **Untitled** until a reply comes back, then the backend
+  names it from the conversation. If it can't produce a usable title, the Chat
+  stays **Untitled** and the next turn tries again. You don't have to wait —
+  rename it whenever you like and the automatic titling leaves your name alone.
 </Callout>
 
 ## Getting around without the mouse
@@ -511,11 +527,12 @@ Each Chat's menu offers:
 Press **⌘K** (**Ctrl+K** on Windows and Linux) anywhere in a Workspace to open
 the command palette. Type to filter.
 
-It offers **Actions** — home, switch org, new chat, new agent, new skill, new
-board, new dashboard, new trigger, add webhook, and the settings screens — and
-then your **Agents**, **Boards** and **Triggers** by name. Selecting an Agent
+It offers **Actions** (creating things and jumping to settings screens), then
+your **Agents**, **Boards** and **Triggers** by name. Selecting an Agent
 opens a new Chat already set to it. **Docs** opens this documentation site in a
-new tab.
+new tab. If your Agents, Boards or Triggers fail to load, the palette shows
+**Couldn't load agents. Retry** (or boards, or triggers) in their place; select
+it to load them again without closing the palette.
 
 ## Losing the connection mid-run
 
@@ -561,7 +578,7 @@ untouched.
 
 ## Per-Chat settings, and when they exist
 
-When you have picked a Provider and model directly, a gear button — tooltip
+When you have picked a Provider and model directly, or nothing yet, a gear button — tooltip
 **Settings** — opens **Chat Settings**: an **Instructions** box, and under
 **Advanced settings** the sampling parameters — **Temperature**, **Seed**,
 **Top-p**, **Top-k**, **Presence Penalty** and **Frequency Penalty** — plus
@@ -579,6 +596,20 @@ takes a whole number from 1-50 steps.
 Leave it empty and a default of 10 steps applies. A research-shaped turn that
 keeps reading long pages through a Web-search backend is the usual reason to
 raise it.
+
+The sampling parameters take the same ranges as an Agent's — see
+[Tune generation](/building-with-platypus/agents#tune-generation). Leave one
+empty to use the Provider or model default. A value outside its range shows an
+error under the field, and until you fix it the Chat refuses to send, save an
+edit, or **Regenerate**.
+
+<Callout type="warning">
+  **A Chat can refuse a message even though you never opened its settings.** A
+  value saved before the current ranges applied stays on the Chat, and every
+  send fails with a message such as **Temperature in Chat Settings must be at
+  least 0.** Open **Chat Settings** — the field is marked — and correct or clear
+  it.
+</Callout>
 
 <Callout type="warning">
   **With an Agent selected there is no settings button.** A Chat does not

@@ -71,6 +71,7 @@ import { AgentAvatar } from "@/components/agent-avatar";
 import { KanbanCardHistory } from "@/components/kanban-card-history";
 import { Calendar } from "@/components/ui/calendar";
 import { toast } from "sonner";
+import { copyWithToast } from "@/lib/clipboard";
 
 type CardSaveData = {
   title?: string;
@@ -788,25 +789,17 @@ export function KanbanCardDialog({
 
   if (!card) return null;
 
-  const handleCopyToClipboard = async () => {
-    const markdown = body ? `# ${title}\n\n${body}` : `# ${title}`;
-    try {
-      await navigator.clipboard.writeText(markdown);
-      toast.success("Copied to clipboard");
-    } catch {
-      toast.error("Failed to copy to clipboard");
-    }
-  };
+  const handleCopyToClipboard = () =>
+    copyWithToast(body ? `# ${title}\n\n${body}` : `# ${title}`);
 
-  const handleCopyLink = async () => {
+  const handleCopyLink = () => {
     const url = new URL(window.location.href);
     url.searchParams.set("cardId", card.id);
-    try {
-      await navigator.clipboard.writeText(url.toString());
-      toast.success("Link copied to clipboard");
-    } catch {
-      toast.error("Failed to copy link");
-    }
+    return copyWithToast(
+      url.toString(),
+      "Link copied to clipboard",
+      "Failed to copy link",
+    );
   };
 
   const toggleLabel = (labelId: string) => {

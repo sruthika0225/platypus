@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
-import type { SQL } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 
 /**
  * Unlike most backend tests, this file does NOT import `../test-utils.ts`:
@@ -10,18 +10,23 @@ import type { SQL } from "drizzle-orm";
  * drizzle real and renders the query instead.
  */
 
-const { mockDb, mockFireTrigger } = vi.hoisted(() => ({
+const { mockDb, mockFireTrigger, mockSendReminders } = vi.hoisted(() => ({
   mockDb: {
     update: vi.fn<(table: unknown) => unknown>(),
     select: vi.fn(),
     execute: vi.fn<(query: SQL) => Promise<unknown>>(),
+    $client: { connect: vi.fn<() => Promise<unknown>>() },
   },
   mockFireTrigger: vi.fn(),
+  mockSendReminders: vi.fn<(now: Date) => Promise<void>>(),
 }));
 
 vi.mock("../index.ts", () => ({ db: mockDb }));
 vi.mock("../services/trigger-firing.ts", () => ({
   fireTrigger: mockFireTrigger,
+}));
+vi.mock("../services/inbound-trigger.ts", () => ({
+  sendInboundTokenReminders: mockSendReminders,
 }));
 
 import { mockLogger } from "../test-setup.ts";
@@ -29,11 +34,13 @@ import { mockLogger } from "../test-setup.ts";
 import {
   recoverStuckChats,
   recoverStuckTriggers,
+  resetInboundReminderSweep,
   runWithLock,
   scheduleAligned,
   startScheduler,
   stuckChatCutoff,
   stuckTriggerCutoff,
+  sweepInboundTokenRemindersIfDue,
 } from "./scheduler.ts";
 import {
   chat as chatTable,
@@ -92,6 +99,66 @@ const captureUpdates = (
 const render = (predicate: SQL | undefined) => {
   if (!predicate) throw new Error("No where clause was captured");
   return dialect.sqlToQuery(predicate);
+};
+
+type FakeClient = {
+  query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[] }>;
+  release: ReturnType<typeof vi.fn>;
+};
+
+/**
+ * A stand-in for the node-postgres Pool behind `db`, modelling the one fact
+ * the scheduler lock depends on: an advisory lock belongs to the connection
+ * that took it, and only that connection can release it. `connect()` checks
+ * out a dedicated connection; `db.execute` lands on whichever idle pooled
+ * connection comes next, as a real pool's does.
+ *
+ * `held` maps a lock ID to the connection holding it. A lock still in it after
+ * `runWithLock` returns is one no peer can take until pg-pool closes that
+ * connection.
+ */
+const fakePg = ({ roundTripMs = 0 }: { roundTripMs?: number } = {}) => {
+  const held = new Map<number, number>();
+  const checkedOut: FakeClient[] = [];
+  // Connections 0 and 1 sit idle in the pool; `connect()` opens 2 onwards.
+  const idle = [0, 1];
+  let nextId = 2;
+  let nextIdle = 0;
+
+  const run = async (connection: number, text: string, values: unknown[]) => {
+    if (roundTripMs) await new Promise((r) => setTimeout(r, roundTripMs));
+    const lockId = Number(values[0]);
+    if (text.includes("pg_try_advisory_lock")) {
+      const owner = held.get(lockId);
+      if (owner === undefined) held.set(lockId, connection);
+      return {
+        rows: [{ acquired: owner === undefined || owner === connection }],
+      };
+    }
+    if (text.includes("pg_advisory_unlock")) {
+      const released = held.get(lockId) === connection;
+      if (released) held.delete(lockId);
+      return { rows: [{ released }] };
+    }
+    return { rows: [] };
+  };
+
+  mockDb.$client.connect.mockImplementation(() => {
+    const connection = nextId++;
+    const client: FakeClient = {
+      query: (text, values = []) => run(connection, text, values),
+      release: vi.fn(),
+    };
+    checkedOut.push(client);
+    return Promise.resolve(client);
+  });
+  mockDb.execute.mockImplementation((query: SQL) => {
+    const { sql: text, params } = dialect.sqlToQuery(query);
+    const connection = idle[nextIdle++ % idle.length];
+    return run(connection, text, params);
+  });
+
+  return { held, checkedOut };
 };
 
 describe("stuckChatCutoff", () => {
@@ -243,7 +310,7 @@ describe("recoverStuckTriggers", () => {
     vi.useRealTimers();
   });
 
-  it("fails only `running` rows started before the Trigger per-run timeout plus the buffer", async () => {
+  it("fails `running` rows past the per-run timeout plus the buffer, and `pending` rows past the buffer alone", async () => {
     process.env.TRIGGER_PER_RUN_TIMEOUT_MS = String(90 * 60 * 1000);
     const { updates } = captureUpdates([]);
 
@@ -257,10 +324,18 @@ describe("recoverStuckTriggers", () => {
     });
     const { sql: text, params } = render(runs.where);
     expect(text).toBe(
-      `("trigger_run"."status" = $1 and "trigger_run"."started_at" < $2)`,
+      `(("trigger_run"."status" = $1 and "trigger_run"."started_at" < $2) or ` +
+        `("trigger_run"."status" = $3 and "trigger_run"."started_at" < $4))`,
     );
-    // 12:00 − (90 min + 5 min buffer).
-    expect(params).toEqual(["running", "2026-08-30T10:25:00.000Z"]);
+    // `running`: 12:00 − (90 min + 5 min buffer). `pending` is an Inbound
+    // Trigger run whose process died between accepting the call and starting
+    // it: it never started, so no per-run timeout applies — 12:00 − 5 min.
+    expect(params).toEqual([
+      "running",
+      "2026-08-30T10:25:00.000Z",
+      "pending",
+      "2026-08-30T11:55:00.000Z",
+    ]);
   });
 
   it("closes the orphaned runs' still-open events as errors, with no duration", async () => {
@@ -286,41 +361,43 @@ describe("recoverStuckTriggers", () => {
     expect(params).toEqual(["run-1", "run-2", "running"]);
   });
 
-  it("touches no events and reads no Triggers when no run was orphaned", async () => {
+  it("touches no events when no run was orphaned", async () => {
     const { updates } = captureUpdates([]);
 
     await recoverStuckTriggers();
 
     expect(updates.map((c) => c.table)).toEqual([triggerRunTable]);
-    expect(mockDb.select).not.toHaveBeenCalled();
   });
 
-  it("reschedules only the claimed cron Triggers whose runs it just failed", async () => {
+  it("reschedules every enabled cron Trigger left with a NULL nextRunAt and no running run", async () => {
     const { updates, selects } = captureUpdates(
-      [
-        { id: "run-1", triggerId: "t1" },
-        { id: "run-2", triggerId: "t1" },
-      ],
+      [],
       [cronTrigger({ cronExpression: "0 * * * *", timezone: "UTC" })],
     );
 
     await recoverStuckTriggers();
 
-    // Restricted to the orphans' own Triggers, once each: a NULL `nextRunAt`
-    // with no stale run behind it is a peer's live claim, not a stuck row.
+    // Not only the orphans' own Triggers: a claim never writes NULL any more,
+    // so a NULL with no live run behind it is a stranded row, not a peer's
+    // claim.
+    const unscheduled = (type: number, enabled: number) =>
+      `("trigger"."type" = $${type} and "trigger"."enabled" = $${enabled} and ` +
+      `"trigger"."next_run_at" is null and not exists (select 1 from ` +
+      `"trigger_run" where "trigger_run"."trigger_id" = "trigger"."id" and ` +
+      `"trigger_run"."status" = 'running'))`;
     const { sql: text, params } = render(selects[0]);
-    expect(text).toBe(
-      `("trigger"."id" in ($1) and "trigger"."type" = $2 and ` +
-        `"trigger"."enabled" = $3 and "trigger"."next_run_at" is null)`,
-    );
-    expect(params).toEqual(["t1", "cron", true]);
+    expect(text).toBe(unscheduled(1, 2));
+    expect(params).toEqual(["cron", true]);
 
-    const reschedule = updates[2];
+    const reschedule = updates[1];
     expect(reschedule.table).toBe(triggerTable);
     expect(reschedule.set.nextRunAt).toEqual(
       new Date("2026-08-30T13:00:00.000Z"),
     );
-    expect(render(reschedule.where).params).toEqual(["t1"]);
+    // Rechecked at write time, so an edit or a claim in between wins.
+    expect(render(reschedule.where).sql).toBe(
+      `("trigger"."id" = $1 and ${unscheduled(2, 3)})`,
+    );
   });
 
   it.each([
@@ -328,18 +405,43 @@ describe("recoverStuckTriggers", () => {
     ["a malformed config", { cronExpression: "" }, 1],
     ["an unparseable cron expression", { cronExpression: "not a cron" }, 1],
   ])("leaves %s unscheduled", async (_label, config, errors) => {
-    const { updates } = captureUpdates(
-      [{ id: "run-1", triggerId: "t1" }],
-      [cronTrigger(config)],
-    );
+    const { updates } = captureUpdates([], [cronTrigger(config)]);
 
     await recoverStuckTriggers();
 
-    expect(updates.map((c) => c.table)).toEqual([
-      triggerRunTable,
-      triggerRunEventTable,
-    ]);
+    expect(updates.map((c) => c.table)).toEqual([triggerRunTable]);
     expect(mockLogger.error).toHaveBeenCalledTimes(errors);
+  });
+});
+
+describe("sweepInboundTokenRemindersIfDue", () => {
+  const HOUR = 60 * 60 * 1000;
+  const T0 = new Date("2026-08-30T12:00:00.000Z").getTime();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetInboundReminderSweep();
+    mockSendReminders.mockResolvedValue(undefined);
+  });
+
+  it("sweeps at most once an hour: the reminders' thresholds are days", async () => {
+    await sweepInboundTokenRemindersIfDue(T0);
+    await sweepInboundTokenRemindersIfDue(T0 + HOUR - 1);
+    expect(mockSendReminders).toHaveBeenCalledTimes(1);
+    expect(mockSendReminders).toHaveBeenCalledWith(new Date(T0));
+
+    await sweepInboundTokenRemindersIfDue(T0 + HOUR);
+    expect(mockSendReminders).toHaveBeenCalledTimes(2);
+  });
+
+  it("tries again on the next tick after a sweep that failed", async () => {
+    mockSendReminders.mockRejectedValueOnce(new Error("db down"));
+
+    await expect(sweepInboundTokenRemindersIfDue(T0)).rejects.toThrow(
+      "db down",
+    );
+    await sweepInboundTokenRemindersIfDue(T0 + 60_000);
+    expect(mockSendReminders).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -348,34 +450,95 @@ describe("runWithLock", () => {
     vi.clearAllMocks();
   });
 
-  const lockAcquired = (acquired: boolean) =>
-    mockDb.execute.mockResolvedValue({ rows: [{ acquired }] });
-
-  it("skips the work, and releases nothing, when a peer holds the lock", async () => {
-    lockAcquired(false);
+  it("skips the work when a peer holds the lock, and hands the connection back", async () => {
+    const pg = fakePg();
+    pg.held.set(42, 999);
     const work = vi.fn();
 
     await runWithLock(42, work);
 
     expect(work).not.toHaveBeenCalled();
-    expect(mockDb.execute).toHaveBeenCalledTimes(1);
-    expect(render(mockDb.execute.mock.calls[0][0])).toMatchObject({
-      sql: "SELECT pg_try_advisory_lock($1) as acquired",
-      params: [42],
+    expect(pg.held.get(42)).toBe(999);
+    expect(pg.checkedOut).toHaveLength(1);
+    expect(pg.checkedOut[0].release).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the lock even when the work issues its own queries", async () => {
+    const pg = fakePg();
+    const work = vi.fn(async () => {
+      // Each of these lands on some pooled connection, as the sweeps' do.
+      // An even count matters: with the pool's two idle connections taken in
+      // turn, a lock and unlock sent through the pool end up on different
+      // ones, which is the bug this pins.
+      await mockDb.execute(sql`SELECT 1`);
+      await mockDb.execute(sql`SELECT 2`);
     });
+
+    await runWithLock(42, work);
+
+    expect(work).toHaveBeenCalledTimes(1);
+    expect(pg.held.has(42)).toBe(false);
+    expect(pg.checkedOut[0].release).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it("lets the next tick take the lock again", async () => {
+    const pg = fakePg();
+    const work = vi.fn(async () => {
+      await mockDb.execute(sql`SELECT 1`);
+    });
+
+    await runWithLock(42, work);
+    await runWithLock(42, work);
+
+    expect(work).toHaveBeenCalledTimes(2);
+    expect(pg.held.has(42)).toBe(false);
   });
 
   it("releases the lock even when the work throws", async () => {
-    lockAcquired(true);
+    const pg = fakePg();
 
     await expect(
       runWithLock(42, () => Promise.reject(new Error("boom"))),
     ).rejects.toThrow("boom");
 
-    expect(render(mockDb.execute.mock.calls[1][0])).toMatchObject({
-      sql: "SELECT pg_advisory_unlock($1)",
-      params: [42],
+    expect(pg.held.has(42)).toBe(false);
+    // The unlock worked, so the connection is fit to go back to the pool.
+    expect(pg.checkedOut[0].release).toHaveBeenCalledWith(undefined);
+  });
+
+  it("discards the connection, and with it the lock, when the unlock fails", async () => {
+    const pg = fakePg();
+
+    await runWithLock(42, () => {
+      // The lock is already taken by now; only the unlock hits this.
+      const client = pg.checkedOut[0];
+      client.query = () => Promise.reject(new Error("connection reset"));
+      return Promise.resolve();
     });
+
+    // Destroying the connection ends its session, which is what frees the
+    // lock when the unlock itself could not.
+    expect(pg.checkedOut[0].release).toHaveBeenCalledWith(expect.any(Error));
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ lockId: 42 }),
+      expect.any(String),
+    );
+  });
+
+  it("warns when the unlock reports the lock was not held", async () => {
+    const pg = fakePg();
+
+    await runWithLock(42, () => {
+      pg.held.delete(42);
+      return Promise.resolve();
+    });
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ lockId: 42 }),
+      expect.any(String),
+    );
+    expect(pg.checkedOut[0].release).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -439,77 +602,146 @@ describe("scheduleAligned", () => {
 });
 
 /**
- * One scheduler tick, end to end through the lock: both sweeps, then the due
+ * Every query a tick makes, answered by `answer` from the table it reads or
+ * writes. A select's `fields` tell the running-run count apart, and `orderBy`
+ * tells the due-Trigger read apart from the recovery sweep's.
+ */
+type Query = {
+  op: "select" | "update";
+  table: unknown;
+  fields?: unknown;
+  ordered: boolean;
+};
+const tickDb = (answer: (q: Query) => unknown[]) => {
+  const chain = (q: Query): unknown => {
+    const self: object = new Proxy(
+      {},
+      {
+        get: (_, key) =>
+          key === "then"
+            ? (ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) =>
+                Promise.resolve()
+                  .then(() => answer(q))
+                  .then(ok, ko)
+            : (arg: unknown) => {
+                if (key === "from") q.table = arg;
+                if (key === "orderBy") q.ordered = true;
+                return self;
+              },
+      },
+    );
+    return self;
+  };
+  mockDb.select.mockImplementation((fields?: unknown) =>
+    chain({ op: "select", table: undefined, fields, ordered: false }),
+  );
+  mockDb.update.mockImplementation((table: unknown) =>
+    chain({ op: "update", table, ordered: false }),
+  );
+};
+
+/**
+ * Scheduler ticks, end to end through the lock: both sweeps, then the due
  * cron Triggers.
  */
 describe("startScheduler", () => {
-  const due = [
-    { id: "t1", name: "A", agentId: "a1" },
-    { id: "t2", name: "B", agentId: "a1" },
-  ];
+  const weekly = {
+    id: "weekly",
+    name: "Weekly research",
+    agentId: "a1",
+    type: "cron",
+    config: { cronExpression: "0 9 * * 1", timezone: "UTC" },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-30T12:00:59.000Z"));
+    vi.setSystemTime(new Date("2026-08-31T08:59:59.000Z"));
     // Each round trip takes a few ms, as a real one does.
-    mockDb.execute.mockImplementation(
-      () =>
-        new Promise((r) =>
-          setTimeout(() => r({ rows: [{ acquired: true }] }), 5),
-        ),
-    );
-    mockFireTrigger.mockResolvedValue("succeeded");
+    pg = fakePg({ roundTripMs: 5 });
   });
 
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  /** Advance to the next minute and let the tick run through its unlock. */
-  const tick = async () => {
-    startScheduler();
-    await vi.advanceTimersByTimeAsync(1_000 + 10);
-    expect(mockDb.execute).toHaveBeenCalledTimes(2);
+  let pg: ReturnType<typeof fakePg>;
+
+  /** The 09:00 tick finds `weekly` due and claims it; later ticks find none. */
+  const weeklyDueOnce = (onQuery: (q: Query) => void = () => {}) => {
+    let claimed = false;
+    tickDb((q) => {
+      onQuery(q);
+      if (q.op === "select" && q.fields) return [{ running: 0 }];
+      if (q.op === "select" && q.ordered) return claimed ? [] : [weekly];
+      if (q.op === "update" && q.table === triggerTable && !claimed) {
+        claimed = true;
+        return [weekly];
+      }
+      return [];
+    });
   };
 
-  it("claims every due Trigger before firing any of them", async () => {
-    const { updates } = captureUpdates([], due);
-    const claimedBeforeFire: boolean[] = [];
-    mockFireTrigger.mockImplementation(() => {
-      claimedBeforeFire.push(updates.some((u) => u.table === triggerTable));
-      return Promise.resolve("succeeded");
+  // #1158: the tick used to await every run it started while holding the
+  // lock, so one long Cron run stopped both sweeps, on every instance, until
+  // it ended.
+  it("sweeps on every tick, on any instance, while a 45-minute Cron run is going", async () => {
+    const sweepTimes: string[] = [];
+    weeklyDueOnce((q) => {
+      if (q.op === "update" && q.table === chatTable) {
+        sweepTimes.push(new Date().toISOString().slice(11, 16));
+      }
     });
+    mockFireTrigger.mockImplementation(
+      () =>
+        new Promise((resolve) => setTimeout(() => resolve("ran"), 45 * 60_000)),
+    );
 
-    await tick();
+    startScheduler(); // backend instance A
+    startScheduler(); // backend instance B, sharing the database lock
 
-    const claim = updates.find((u) => u.table === triggerTable)!;
-    // NULL is the claim: `nextRunAt <= NOW()` is false for it, so no later
-    // tick (on this instance or a peer) can pick the Trigger up again.
-    expect(claim.set).toEqual({ nextRunAt: null });
-    expect(render(claim.where).params).toEqual(["t1", "t2"]);
-    expect(mockFireTrigger.mock.calls).toEqual([
-      [due[0], { kind: "cron" }],
-      [due[1], { kind: "cron" }],
-    ]);
-    expect(claimedBeforeFire).toEqual([true, true]);
+    await vi.advanceTimersByTimeAsync(1_050); // through the 09:00 tick
+    expect(mockFireTrigger).toHaveBeenCalledTimes(1);
+    expect(sweepTimes).toEqual(["09:00"]);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000); // to 09:30
+    // One sweep a minute: whichever instance wins each tick runs it.
+    expect(sweepTimes).toEqual(
+      Array.from({ length: 31 }, (_, i) => `09:${String(i).padStart(2, "0")}`),
+    );
+    expect(mockFireTrigger).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the lock while a run it started never finishes", async () => {
+    weeklyDueOnce();
+    mockFireTrigger.mockReturnValue(new Promise(() => {}));
+
+    startScheduler();
+    await vi.advanceTimersByTimeAsync(1_050);
+
+    expect(mockFireTrigger).toHaveBeenCalledTimes(1);
+    expect(pg.held.size).toBe(0);
+    expect(pg.checkedOut[0].release).toHaveBeenCalledTimes(1);
   });
 
   it("still sweeps Chats and fires due Triggers when the Trigger sweep fails", async () => {
-    const { updates } = captureUpdates([], due);
-    const update = mockDb.update.getMockImplementation()!;
-    mockDb.update.mockImplementation((table: unknown) => {
-      if (table === triggerRunTable) throw new Error("sweep down");
-      return update(table);
+    const tables: unknown[] = [];
+    weeklyDueOnce((q) => {
+      if (q.op === "update" && q.table === triggerRunTable) {
+        throw new Error("sweep down");
+      }
+      if (q.op === "update") tables.push(q.table);
     });
+    mockFireTrigger.mockResolvedValue("ran");
 
-    await tick();
+    startScheduler();
+    await vi.advanceTimersByTimeAsync(1_050);
 
     expect(mockLogger.error).toHaveBeenCalledWith(
       expect.anything(),
       "Trigger recovery sweep failed",
     );
-    expect(updates.map((u) => u.table)).toEqual([chatTable, triggerTable]);
-    expect(mockFireTrigger).toHaveBeenCalledTimes(2);
+    expect(tables).toEqual([chatTable, triggerTable]);
+    expect(mockFireTrigger).toHaveBeenCalledTimes(1);
   });
 });

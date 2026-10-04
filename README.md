@@ -16,7 +16,7 @@
   <a href="https://www.typescriptlang.org/"><img src="https://img.shields.io/badge/TypeScript-6.0-blue.svg" alt="TypeScript" /></a>
 </p>
 
-Platypus is an open-source, full-stack application for building AI Agents that reason, use tools, and keep working when you aren't watching. You bring the models — hosted, proxied, or running on your own hardware — and Platypus gives you the Agents, the tools they call, the schedules they run on, and the multi-tenant boundaries that keep one team's work out of another's.
+Platypus is an open-source, full-stack application for building AI Agents that reason, use tools, and keep working when you aren't watching. You bring the models — hosted, proxied, or running on your own hardware — and Platypus gives you the Agents, the tools they call, the Triggers that run them, and the multi-tenant boundaries that keep one team's work out of another's.
 
 🌐 **Visit the website at [platypus.chat](https://platypus.chat).**
 
@@ -54,14 +54,15 @@ See it all come together in the [daily board digest worked example](https://docs
 ## 🚀 Quick Start (Docker)
 
 ```bash
-git clone https://github.com/willdady/platypus.git
-cd platypus
-cp .env.example .env   # set BETTER_AUTH_SECRET and your admin credentials
-docker compose up -d   # then open http://localhost:3000
+curl -fsSL https://platypus.chat/install.sh | ADMIN_EMAIL=you@example.com bash
 ```
 
+Needs Linux or macOS (Windows via WSL) and Docker with Compose v2. The installer pins the latest release, generates a secret and admin password, starts the stack, and prints where to sign in.
+
 > [!CAUTION]
-> Change the default password after your first login!
+> The printed credentials are temporary. Change the password after your first login!
+
+Installer settings and the manual, clone-based install are in [Deploy with Docker Compose](https://docs.platypus.chat/self-hosting/docker-compose).
 
 Sign-in is email and password; there is no SSO/OIDC/SAML.
 

@@ -1,6 +1,6 @@
 ---
 title: Workspace settings
-description: The per-Workspace form — its Context, the task and memory Providers, memory retention, and the two switches that hand work to the owner.
+description: The per-Workspace form — its Context, the task and memory Providers, memory retention, the two switches that hand work to the owner, and whether it takes Inbound Trigger calls.
 ---
 
 import { Callout } from "nextra/components";
@@ -8,8 +8,9 @@ import { Callout } from "nextra/components";
 # Workspace settings
 
 Most of what makes a Workspace behave the way it does is one form:
-**Workspace settings**, reachable from the Workspace itself. It is shorter than it
-looks — a name, some text, three Provider dropdowns, a number, and two switches.
+**Workspace settings**, opened from **Workspace** in the gear menu at the top
+right of any page in the Workspace. It is shorter than it looks — a name, some text, three
+Provider dropdowns, a number, and two switches.
 
 ## Creating a Workspace
 
@@ -22,9 +23,10 @@ keeps what you entered; nothing is created until **Save** on the last one.
    - **Owner** — the member who will own it. Defaults to you.
    - **Context** — optional text about the Workspace.
 2. **Provider** — required, because a Workspace cannot run a Chat without one.
-   Either fill in a **New provider**, scoped to this Workspace, or switch to
-   **Shared provider** and turn on one or more of the Organization's Shared
-   Providers to attach.
+   Either turn on one or more of the Organization's Shared Providers under
+   **Shared provider**, or switch to **New provider** and fill in one scoped to
+   this Workspace. The step opens on **Shared provider** when the Organization
+   has any, and on **New provider** when it has none.
 3. **Sandbox** — optional. Turn on **Configure a sandbox** to set one up now,
    or leave it off and add one later from the Workspace's settings. The switch
    is unavailable when the deployment has no Sandbox backend installed.
@@ -51,8 +53,8 @@ service is called, which team owns it, house terminology.
   settings → Contexts**, even though both land in the prompt. This field is the
   Workspace's and reaches everyone in it; theirs is private to them. Personal
   preferences ("answer terse, no preamble") belong in theirs — putting them here
-  imposes them on every Chat in the Workspace. See
-  [Memory & context](/concepts/memory-and-context#three-different-things-are-called-context).
+  imposes them on every Chat in the Workspace. See [Memory &
+  context](/concepts/memory-and-context#three-different-things-are-called-context).
 </Callout>
 
 ## The three Provider dropdowns
@@ -81,9 +83,17 @@ that Workspace.
 
 ## Memory Summary Retention
 
-How many daily memory summaries to keep, from **7** to **365**, defaulting to
-**90**. Lower it where conversations are sensitive and you'd rather they aged out;
-raise it where an Agent genuinely benefits from remembering last quarter.
+How many daily memory summaries to keep for each member, from **7** to **365**,
+defaulting to **90**. The oldest past that number are deleted the next time
+Memory writes a summary for that member.
+
+<Callout type="warning">
+  Lowering it deletes nothing on its own. While **Memory Extraction Provider**
+  is **Disabled**, or for a member who hasn't chatted since, the old summaries
+  stay. It doesn't change what goes into the prompt either: older summaries
+  reach an Agent only through the **Memory** Tool set — see [Memory &
+  context](/concepts/memory-and-context).
+</Callout>
 
 ## The two delegation switches
 
@@ -109,12 +119,24 @@ The switches only cover **Workspace-scoped** resources. An owner can never edit 
 Shared one, and never touch the Sandbox — that stays admin-only whatever these
 say.
 
+## Allow Inbound Triggers
+
+Visible only to an Org Admin, and **off** by default. It lets this Workspace's
+[Inbound Triggers](/building-with-platypus/triggers#inbound-triggers) take
+calls, and it only matters while the Organization's **Inbound Triggers** setting
+is **Selected workspaces** — see [Inbound Triggers](/administering#inbound-triggers).
+Under **No workspaces** or **All workspaces** the switch is locked, and its description
+says which applies and links to the Organization's **Inbound Triggers** screen,
+which lists the same switch for every Workspace.
+
 ## Deleting a Workspace
 
 **Delete** asks you to type `Delete workspace` to confirm, and takes everything
 scoped to the Workspace — including each member's own **Workspace Context** for
-it. Shared resources are only detached, not deleted. It is not recoverable from
-inside the product — only from a database backup.
+it. Shared resources are only detached, not deleted. Its Sandbox is torn down
+too. With the Docker backend that removes the container and its volume, so any
+files an Agent left in `/workspace` are gone. With SSH the host is left alone.
+It is not recoverable from inside the product — only from a database backup.
 
 ## Where to next
 

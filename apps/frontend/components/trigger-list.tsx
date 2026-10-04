@@ -2,6 +2,10 @@
 
 import { useState } from "react";
 import {
+  INBOUND_TOKEN_STATUS_LABELS,
+  INBOUND_TOKEN_STATUS_VARIANTS,
+} from "@/lib/inbound-trigger";
+import {
   Item,
   ItemTitle,
   ItemActions,
@@ -27,18 +31,22 @@ import { Badge } from "@/components/ui/badge";
 import {
   Timer,
   Zap,
+  Webhook,
   Play,
   EllipsisVertical,
   Pencil,
   Trash2,
   Pause,
   List,
+  TriangleAlert,
 } from "lucide-react";
 import {
   type Trigger,
   type Agent,
   type CronTriggerConfig,
   type EventTriggerConfig,
+  type InboundTriggerConfig,
+  type TriggerType,
 } from "@platypus/schemas";
 import Link from "next/link";
 import { useBackendUrl } from "@/components/auth-provider";
@@ -64,6 +72,12 @@ const describeSchedule = (cronExpression: string, timezone: string): string => {
   }
 };
 
+export const TRIGGER_TYPE_LABELS: Record<TriggerType, string> = {
+  cron: "Cron",
+  event: "Event",
+  inbound: "Inbound",
+};
+
 /** The trigger cards as they load; the workspace home draws them too. */
 export const TriggerCardsSkeleton = ({ cards }: { cards?: number }) => (
   <CardGridSkeleton
@@ -78,6 +92,53 @@ export const TriggerCardsSkeleton = ({ cards }: { cards?: number }) => (
     }
   />
 );
+
+/** An Inbound Trigger's line: what it takes, and how its token stands. */
+const InboundSummary = ({ trigger }: { trigger: Trigger }) => {
+  const config = trigger.config as InboundTriggerConfig;
+  const inputs = config.inputs;
+  const status = trigger.tokenStatus ?? "none";
+  return (
+    <span className="flex items-center gap-1 flex-wrap">
+      <Webhook className="h-3 w-3" />
+      Called from outside
+      {inputs.length > 0 && (
+        <>
+          {" · Inputs:"}
+          {inputs.map((input) => (
+            <Badge
+              key={input.name}
+              variant="secondary"
+              className="text-xs font-mono"
+            >
+              {input.name}
+            </Badge>
+          ))}
+        </>
+      )}
+      {status === "expiring" && (
+        <>
+          {" · "}
+          <span className="flex items-center gap-1 text-warning-foreground">
+            <TriangleAlert className="h-3 w-3" />
+            Token expiring soon
+          </span>
+        </>
+      )}
+      {(status === "none" || status === "expired") && (
+        <>
+          {" · Token:"}
+          <Badge
+            variant={INBOUND_TOKEN_STATUS_VARIANTS[status]}
+            className="text-xs"
+          >
+            {INBOUND_TOKEN_STATUS_LABELS[status]}
+          </Badge>
+        </>
+      )}
+    </span>
+  );
+};
 
 export const TriggerList = ({
   orgId,
@@ -174,7 +235,7 @@ export const TriggerList = ({
                   <div className="flex items-center gap-2">
                     <ItemTitle>{trigger.name}</ItemTitle>
                     <Badge variant="outline" className="text-xs">
-                      {trigger.type === "cron" ? "Cron" : "Event"}
+                      {TRIGGER_TYPE_LABELS[trigger.type] ?? trigger.type}
                     </Badge>
                     {trigger.type === "cron" &&
                       (trigger.config as CronTriggerConfig).isOneOff && (
@@ -224,6 +285,8 @@ export const TriggerList = ({
                           </span>
                         )}
                       </>
+                    ) : trigger.type === "inbound" ? (
+                      <InboundSummary trigger={trigger} />
                     ) : (
                       <span className="flex items-center gap-1 flex-wrap">
                         <Zap className="h-3 w-3" />
@@ -249,6 +312,7 @@ export const TriggerList = ({
                         className="cursor-pointer text-muted-foreground"
                         variant="ghost"
                         size="icon"
+                        aria-label={`Actions for ${trigger.name}`}
                         onClick={(e) => e.preventDefault()}
                       >
                         <EllipsisVertical className="h-4 w-4" />
@@ -308,7 +372,7 @@ export const TriggerList = ({
         open={deleteFlow.open}
         onOpenChange={(open) => !open && deleteFlow.close()}
         title="Delete Trigger"
-        description={`Are you sure you want to delete "${deleteFlow.target?.name}"? This will also delete all chat history for this trigger. This action cannot be undone.`}
+        description={`Are you sure you want to delete "${deleteFlow.target?.name}"? This will also delete all run history for this trigger. This action cannot be undone.`}
         onConfirm={deleteFlow.confirm}
         loading={deleteFlow.deleting}
         error={deleteFlow.error}
